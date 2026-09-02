@@ -1,0 +1,14 @@
+{
+  "name": "huangjin-local",
+  "owner": { "name": "Jin Huang" },
+  "metadata": { "description": "Local plugins", "version": "0.1.0" },
+  "plugins": [
+    {
+      "name": "wt",
+      "source": "./",
+      "description": "Session-native git worktrees: /wt:worktree and /wt:land",
+      "category": "productivity",
+      "tags": ["worktree", "git"]
+    }
+  ]
+}
