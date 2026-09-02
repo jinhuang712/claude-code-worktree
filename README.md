@@ -23,15 +23,21 @@ A `PostToolUse` hook records every file this session edits through Edit/Write in
 ## Install (local marketplace)
 
 ```bash
-claude plugin marketplace add /path/to/claude-code-worktree
+claude plugin marketplace add jinhuang712/claude-code-worktree
 claude plugin install wt@huangjin-local
 ```
+
+Or from a local clone: `claude plugin marketplace add /path/to/claude-code-worktree`. After editing the source, run `claude plugin update wt@huangjin-local`.
 
 Optional per-repo config `.claude/wt.json`:
 
 ```json
 { "check": "ruff check .", "test": "pytest -q", "lockfiles": ["uv.lock"], "migrations": ["migrations/**"] }
 ```
+
+## License
+
+MIT. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## Script
 
