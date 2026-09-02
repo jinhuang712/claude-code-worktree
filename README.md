@@ -20,20 +20,37 @@ A `PostToolUse` hook records every file this session edits through Edit/Write in
 - Fast-forward is done in whatever checkout has the base; git itself refuses if another session's uncommitted files overlap.
 - Cleanup happens only after `merge-base --is-ancestor` confirms the commits are on base.
 
-## Install (local marketplace)
+## Install
+
+Requires Claude Code ≥ 2.1.185 (for `EnterWorktree` / `ExitWorktree`), git ≥ 2.23 and Python 3.
 
 ```bash
+# 1. register this repo as a plugin marketplace (one-time)
 claude plugin marketplace add jinhuang712/claude-code-worktree
-claude plugin install wt@huangjin-local
+
+# 2. install the plugin (user scope by default; add --scope project to share via .claude/settings.json)
+claude plugin install wt@claude-code-worktree
 ```
 
-Or from a local clone: `claude plugin marketplace add /path/to/claude-code-worktree`. After editing the source, run `claude plugin update wt@huangjin-local`.
+Start a new Claude Code session; `/wt:worktree` and `/wt:land` are now available and the file-tracking hook is active.
 
-Optional per-repo config `.claude/wt.json`:
+```bash
+claude plugin list                             # verify: wt@claude-code-worktree · enabled
+claude plugin update wt@claude-code-worktree   # pull a newer version
+claude plugin uninstall wt@claude-code-worktree
+```
+
+Developing locally: `claude plugin marketplace add /path/to/clone` instead of the GitHub slug, then `claude plugin update` after every source change (installs are copies, not symlinks).
+
+### Optional per-repo config
+
+`.claude/wt.json` in the repository you work on:
 
 ```json
 { "check": "ruff check .", "test": "pytest -q", "lockfiles": ["uv.lock"], "migrations": ["migrations/**"] }
 ```
+
+`check`/`test` run in `/wt:land` before landing; `lockfiles` are regenerated instead of hand-merged on conflict; `migrations` conflicts always stop for a human.
 
 ## License
 

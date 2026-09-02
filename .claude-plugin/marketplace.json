@@ -1,14 +1,22 @@
 {
-  "name": "huangjin-local",
-  "owner": { "name": "Jin Huang" },
-  "metadata": { "description": "Local plugins", "version": "0.1.0" },
+  "name": "claude-code-worktree",
+  "owner": {
+    "name": "Jin Huang"
+  },
+  "metadata": {
+    "description": "Session-native git worktrees for Claude Code",
+    "version": "0.1.1"
+  },
   "plugins": [
     {
       "name": "wt",
       "source": "./",
       "description": "Session-native git worktrees: /wt:worktree and /wt:land",
       "category": "productivity",
-      "tags": ["worktree", "git"]
+      "tags": [
+        "worktree",
+        "git"
+      ]
     }
   ]
 }

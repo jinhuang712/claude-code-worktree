@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.1.1] - 2026-09-03
+
+### Changed
+- Marketplace renamed `huangjin-local` → `claude-code-worktree`; install is now `claude plugin marketplace add jinhuang712/claude-code-worktree && claude plugin install wt@claude-code-worktree`.
+- README gained a dedicated Install section (verify / update / uninstall, per-repo config).
+
 ## [0.1.0] - 2026-09-03
 
 ### Added
