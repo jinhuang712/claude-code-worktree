@@ -41,6 +41,8 @@ Pick a name: `$ARGUMENTS` if given, otherwise a 2–4 word kebab slug for the ta
 python3 "$WT" start <name> --take <path> <path> ...
 ```
 
+`start` must run from the main checkout. If this session is already inside a worktree, call `ExitWorktree` (`keep`) first.
+
 Omit `--take` when nothing should move. The script: stashes only the listed paths, creates `.claude/worktrees/<name>` on branch `wt-<name>` from the current HEAD, re-applies the stash there, records base branch + fork sha in git config, copies `.worktreeinclude` files.
 
 On `"ok": false`, report the `error` verbatim and stop; the script never leaves a half-state (a leftover stash tagged `wt:<name>` is resumed automatically on retry).
@@ -52,3 +54,11 @@ Call `EnterWorktree` with the `worktree` path from the JSON (it is inside `.clau
 ## 4. Report
 
 One short message: branch, base, which files moved, which were left behind and why. Then continue with the user's actual task. When the work is done, the user runs `/wt:land`.
+
+## 5. Working inside the worktree
+
+The session is now isolated: Claude Code refuses any Bash command it cannot prove stays inside the worktree ("too complex to verify"), and every refusal wastes a turn. What gets refused most: loops, `$(…)` and backticks, heredocs (`<<EOF`, `-F -`), `VAR=…` assignments, and `cd` anywhere but this worktree. What passes: a plain command, and `python3 <file>` / `bash <file>`.
+
+- Need a script, a multi-line edit or a commit message? Write it to a file with the Write tool (the scratchpad is fine), then run `python3 <file>` or `git commit -F <file>` as one plain command.
+- Run `git add` and `git commit` as separate plain commands.
+- Never `cd` out of the worktree and never aim git at another checkout.

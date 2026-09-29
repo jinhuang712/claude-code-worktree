@@ -28,7 +28,7 @@ allowed-tools:
 python3 "$WT" status
 ```
 
-If `dirty` is non-empty: review `git diff`, then commit with a real message describing the change (one commit per logical change is fine). If `base_exists` is false, ask the user which branch to land on and pass it to `rebase --onto <branch>`.
+If `dirty` is non-empty: review `git diff`, then commit with a real message describing the change (one commit per logical change is fine). Use commands the worktree isolation guard accepts: `git add <paths>`, then `git commit -q -m "<subject>" -m "<body>"`, or write the message to a file with the Write tool and run `git commit -q -F <file>`. A heredoc (`<<EOF`, `-F -`), `cd`, or `$(…)` is refused as "too complex to verify" and costs a turn. If `base_exists` is false, ask the user which branch to land on and pass it to `rebase --onto <branch>`.
 
 ### A2. Rebase
 
