@@ -2,7 +2,7 @@
 """claude-code-worktree: deterministic git state machine behind /worktree and /land.
 
 Stdlib only. Every subcommand prints one JSON object on stdout.
-Exit codes: 0 ok · 1 error/precondition · 7 merge conflicts pending · 8 verify failed
+Exit codes: 0 ok · 1 error/precondition · 7 merge conflicts pending · 8 verify failed · 9 landed, push failed
 """
 from __future__ import annotations
 
@@ -22,13 +22,14 @@ try:
 except ImportError:  # no flock (Windows): landings are then not serialized
     fcntl = None
 
-EXIT_OK, EXIT_ERR, EXIT_CONFLICT, EXIT_VERIFY = 0, 1, 7, 8
+EXIT_OK, EXIT_ERR, EXIT_CONFLICT, EXIT_VERIFY, EXIT_PUSH = 0, 1, 7, 8, 9
 BRANCH_PREFIX = "wt-"
 WT_DIR = ".claude/worktrees"
 STASH_TAG = "wt:"
 CONFIG_FILE = ".claude/wt.json"
 DIFF_LIMIT = 6000  # chars of diff context per conflicted file
 LOCK_TIMEOUT = 300  # seconds `finish` waits for another landing; override with "lockTimeoutSec"
+PUSH_TIMEOUT = 120  # seconds `git push` may take after landing; below LOCK_TIMEOUT so a hung remote frees the lock
 
 
 class WtError(Exception):
@@ -663,6 +664,30 @@ def rebase_before_landing(m: dict, wt_path: Path) -> dict:
     return {"rebased_during_finish": True, "base_moved_by": behind, "verified": verdict["configured"]}
 
 
+def push_remote(repo: Repo) -> str | None:
+    """`"push": true` in .claude/wt.json means origin; a string names the remote; anything else, no push."""
+    v = repo.config().get("push")
+    if v is True:
+        return "origin"
+    return v if isinstance(v, str) and v else None
+
+
+def push_base(repo: Repo, base: str, remote: str, where: str | None) -> dict:
+    """Push the landed base branch. Never forces: a rejected push is reported, and the landing stands."""
+    cwd = where or str(repo.root)
+    if git_rc("remote", "get-url", remote, cwd=cwd)[0]:
+        return {"ok": False, "remote": remote, "error": f"no remote named {remote}"}
+    ref = f"refs/heads/{base}"
+    try:
+        p = subprocess.run(["git", "push", remote, f"{ref}:{ref}"], cwd=cwd, text=True, capture_output=True,
+                           timeout=PUSH_TIMEOUT, env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "remote": remote, "error": f"git push did not finish within {PUSH_TIMEOUT}s"}
+    if p.returncode:
+        return {"ok": False, "remote": remote, "error": (p.stderr or p.stdout).strip()[-1500:]}
+    return {"ok": True, "remote": remote, "ref": base, "sha": repo.sha(base)}
+
+
 def cmd_finish(args):
     repo = Repo()
     name = sanitize(args.name)
@@ -737,10 +762,15 @@ def finish_locked(repo: Repo, args, m: dict, branch: str):
     if git_rc("merge-base", "--is-ancestor", target_sha, base, cwd=repo.root)[0] != 0 and not args.squash:
         raise WtError("verification failed: worktree head is not an ancestor of base after landing; nothing cleaned up")
 
+    remote = None if args.no_push else push_remote(repo)
+    push = push_base(repo, base, remote, where) if remote else None
     if not args.keep:
         steps += cleanup(repo, m, force_branch=force_branch)
-    emit({"ok": True, "landed": len(commits), "base": base, "base_now": repo.sha(base),
-          "commits": commits, "steps": steps, "kept": bool(args.keep), **(rebased or {})})
+    out = {"ok": True, "landed": len(commits), "base": base, "base_now": repo.sha(base),
+           "commits": commits, "steps": steps, "kept": bool(args.keep), **(rebased or {})}
+    if push:
+        out["push"] = push
+    emit(out, EXIT_OK if not push or push["ok"] else EXIT_PUSH)
 
 
 # ─── abandon / list ─────────────────────────────────────────────────────────
@@ -818,6 +848,7 @@ def main(argv=None):
     p = sub.add_parser("finish", help="from main checkout: ff-merge wt-<name> into base and clean up")
     p.add_argument("--name", required=True); p.add_argument("--squash", action="store_true")
     p.add_argument("--message", "-m"); p.add_argument("--keep", action="store_true")
+    p.add_argument("--no-push", action="store_true", help="skip the push configured in .claude/wt.json")
     p = sub.add_parser("abandon", help="from main checkout: bring changes back (or discard) and remove worktree")
     p.add_argument("name"); p.add_argument("--discard", action="store_true")
     sub.add_parser("list", help="list wt-* branches and their metadata")

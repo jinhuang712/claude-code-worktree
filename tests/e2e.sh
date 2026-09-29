@@ -190,4 +190,42 @@ echo "$OUT" | grep -q "not checked out anywhere" || fail "base ref move: $OUT"
 [ "$(git rev-parse main)" = "$(git -C "$W" rev-parse HEAD)" ] || fail "main should point at the worktree head"
 [ -d "$W" ] && git rev-parse -q --verify wt-feat-k >/dev/null || fail "--keep must keep worktree and branch"
 echo "✓ finish --keep; base not checked out"
+
+# ─── opt-in push: "push": true in .claude/wt.json ───
+remote_sha(){ git --git-dir="$T/$1.git" rev-parse main; }
+newrepo pushy
+git init -q --bare -b main "$T/origin.git"; git remote add origin "$T/origin.git"
+mkdir -p .claude; echo '{"push":true}' > .claude/wt.json; git add -A; git commit -qm cfg; git push -q origin main
+W=$(wtstart feat-p); wtcommit "$W" p
+OUT=$(python3 "$WT" finish --name feat-p)
+[ "$(echo "$OUT" | j "d['push']['ok']")" = True ] || fail "push not reported ok: $OUT"
+[ "$(remote_sha origin)" = "$(git rev-parse main)" ] || fail "origin/main should equal main after landing"
+echo "✓ push: true pushes the landed base"
+
+# origin moved elsewhere: the push is rejected (never forced), the landing still stands
+git clone -q "$T/origin.git" "$T/other"
+(cd "$T/other"; git config user.email t@t; git config user.name t; echo o > o.txt; git add o.txt; git commit -qm other; git push -q origin main)
+OTHER=$(remote_sha origin)
+W=$(wtstart feat-q); wtcommit "$W" q
+set +e; OUT=$(python3 "$WT" finish --name feat-q); RC=$?; set -e
+[ $RC -eq 9 ] || fail "expected exit 9, got $RC: $OUT"
+[ "$(echo "$OUT" | j "d['landed']")" = 1 ] && [ "$(echo "$OUT" | j "d['push']['ok']")" = False ] || fail "push failure report: $OUT"
+[ -f q.txt ] && [ ! -d "$W" ] || fail "landing and cleanup must stand after a rejected push"
+[ "$(remote_sha origin)" = "$OTHER" ] || fail "a rejected push must not change origin"
+echo "✓ rejected push → exit 9, landing kept, origin untouched"
+
+# --no-push skips it
+W=$(wtstart feat-r); wtcommit "$W" r
+OUT=$(python3 "$WT" finish --name feat-r --no-push)
+[ "$(echo "$OUT" | j "'push' in d")" = False ] || fail "--no-push must not push: $OUT"
+echo "✓ --no-push"
+
+# a remote without the config: nothing is pushed
+newrepo nopush
+git init -q --bare -b main "$T/nopush-origin.git"; git remote add origin "$T/nopush-origin.git"; git push -q origin main
+BEFORE=$(git --git-dir="$T/nopush-origin.git" rev-parse main)
+W=$(wtstart feat-s); wtcommit "$W" s
+OUT=$(python3 "$WT" finish --name feat-s)
+[ "$(echo "$OUT" | j "'push' in d")" = False ] && [ "$(git --git-dir="$T/nopush-origin.git" rev-parse main)" = "$BEFORE" ] || fail "no config, no push: $OUT"
+echo "✓ no push without the config"
 echo ALL PASS
