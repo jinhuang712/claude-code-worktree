@@ -17,6 +17,14 @@ A plain `git worktree add`, the built-in `EnterWorktree` (`worktree-<name>` bran
 
 A `PostToolUse` hook records every file this session edits through Edit/Write into `.git/claude-wt/sessions/<session>.txt`. `wt.py plan` splits the dirty tree into `ours` / `theirs` / `shared` / `unknown`; the skill takes `ours`, judges `unknown` from its own conversation, asks about `shared`, never touches `theirs`. Moving is a pathspec-limited `git stash push -u` re-applied in the new worktree.
 
+Each entry is `<worktree root><TAB><path>`, so the same relative path edited in another worktree is a different file. Another session only counts as live for `sessionTtlHours` (default 12) after its last edit; a file it touched before that is `unknown`, not `theirs`. A repeat edit refreshes the clock, and `start` deletes session files untouched for a week.
+
+## Housekeeping
+
+`wt.py list --all` shows every linked worktree: branch, base, ahead/behind, uncommitted files, whether it is merged (a commit the base already has as a patch counts, via `git cherry`), live sessions, idle time, and the reasons `gc` would keep it. `wt.py gc` is a dry run; `--apply` removes what it lists.
+
+A worktree is a candidate only when it is under `.claude/worktrees`, clean, not mid-rebase, fully merged into its base, has no live session, and saw no activity (HEAD, reflog, tip commit, session edits) for `gcMinAgeHours` (default 24; `--min-age-hours` overrides). Nothing outside `.claude/worktrees` is touched, and a squash of several commits into one is not recognised as merged, so that worktree is kept. `--apply` takes the landing lock, re-checks each candidate, removes it without `--force`, then deletes its branch.
+
 ## Landing safety
 
 - Fork point is recorded (`branch.wt-<name>.wtBaseSha`), so `rebase --onto` is correct even if the base was force-pushed.
@@ -53,12 +61,12 @@ Developing locally: `claude plugin marketplace add /path/to/clone` instead of th
 `.claude/wt.json` in the repository you work on:
 
 ```json
-{ "check": "ruff check .", "test": "pytest -q", "lockfiles": ["uv.lock"], "migrations": ["migrations/**"], "push": true, "lockTimeoutSec": 300 }
+{ "check": "ruff check .", "test": "pytest -q", "lockfiles": ["uv.lock"], "migrations": ["migrations/**"], "push": true, "lockTimeoutSec": 300, "sessionTtlHours": 12, "gcMinAgeHours": 24 }
 ```
 
 `check`/`test` run in `/wt:land` before landing; `lockfiles` are regenerated instead of hand-merged on conflict; `migrations` conflicts always stop for a human.
 
-`push` is off unless set. `true` pushes the base branch to `origin` after landing, a string names another remote, and `wt.py finish --no-push` skips it once. It never forces: a rejected push keeps the landing, still cleans up, and exits 9 with the error in the `push` field. `lockTimeoutSec` (default 300) is how long `finish` waits for another landing.
+`push` is off unless set. `true` pushes the base branch to `origin` after landing, a string names another remote, and `wt.py finish --no-push` skips it once. It never forces: a rejected push keeps the landing, still cleans up, and exits 9 with the error in the `push` field. `lockTimeoutSec` (default 300) is how long `finish` waits for another landing. `sessionTtlHours` and `gcMinAgeHours` are described under Housekeeping and "How only our changes works".
 
 ## License
 
@@ -66,4 +74,4 @@ MIT. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## Script
 
-`scripts/wt.py` (Python 3, stdlib only). Subcommands: `track plan start status adopt land rebase continue verify finish abandon list`. `land` is `adopt` + `rebase` + `verify` in one call. Exit codes: 0 ok · 1 error · 7 conflicts pending · 8 verify failed · 9 landed but push failed. Tests: `tests/e2e.sh`.
+`scripts/wt.py` (Python 3, stdlib only). Subcommands: `track plan start status adopt land rebase continue verify finish abandon list gc`. `land` is `adopt` + `rebase` + `verify` in one call. Exit codes: 0 ok · 1 error · 7 conflicts pending · 8 verify failed · 9 landed but push failed. Tests: `tests/e2e.sh`.
