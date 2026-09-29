@@ -30,6 +30,9 @@ CONFIG_FILE = ".claude/wt.json"
 DIFF_LIMIT = 6000  # chars of diff context per conflicted file
 LOCK_TIMEOUT = 300  # seconds `finish` waits for another landing; override with "lockTimeoutSec"
 MAX_STACK_CHECK = 200  # local branches examined when deciding whether a foreign worktree is stacked
+SESSION_TTL_HOURS = 12  # another session counts as live this long after its last edit; "sessionTtlHours"
+SESSION_PRUNE_DAYS = 7  # `start` deletes session files untouched for this long
+GC_MIN_AGE_HOURS = 24  # `gc` leaves worktrees alone that saw any activity this recently; "gcMinAgeHours"
 PUSH_TIMEOUT = 120  # seconds `git push` may take after landing; below LOCK_TIMEOUT so a hung remote frees the lock
 
 
@@ -42,7 +45,7 @@ class WtError(Exception):
 # ─── git helpers ────────────────────────────────────────────────────────────
 
 def git(*args: str, cwd: str | Path | None = None, check: bool = True, env: dict | None = None) -> str:
-    e = dict(os.environ, GIT_EDITOR="true", GIT_TERMINAL_PROMPT="0")
+    e = dict(os.environ, GIT_EDITOR="true", GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
     if env:
         e.update(env)
     p = subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, env=e)
@@ -53,7 +56,7 @@ def git(*args: str, cwd: str | Path | None = None, check: bool = True, env: dict
 
 def git_rc(*args: str, cwd=None) -> tuple[int, str, str]:
     p = subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True,
-                       env=dict(os.environ, GIT_EDITOR="true", GIT_TERMINAL_PROMPT="0"))
+                       env=dict(os.environ, GIT_EDITOR="true", GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0"))
     return p.returncode, p.stdout, p.stderr
 
 
@@ -146,21 +149,82 @@ class Repo:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def session_lines(self, f: Path) -> list[tuple[str | None, str]]:
+        """(worktree root, path) per line of a session file; root is None on lines written before roots were kept."""
+        out = []
+        for ln in f.read_text().splitlines():
+            if ln:
+                root, sep, p = ln.partition("\t")
+                out.append((root, p) if sep else (None, ln))
+        return out
+
     def session_files(self, sid: str) -> set[str]:
+        """Paths this session edited in this checkout."""
         f = self.sessions_dir / f"{sid}.txt"
-        return set(p for p in f.read_text().splitlines() if p) if f.exists() else set()
+        if not f.exists():
+            return set()
+        return {p for root, p in self.session_lines(f) if root in (None, str(self.root))}
+
+    def session_ttl(self) -> float:
+        """Seconds another session counts as live after its last edit (`sessionTtlHours`, default 12)."""
+        try:
+            return float(self.config().get("sessionTtlHours", SESSION_TTL_HOURS)) * 3600
+        except (WtError, ValueError):
+            return SESSION_TTL_HOURS * 3600
 
     def other_session_files(self, sid: str) -> dict[str, list[str]]:
-        """path -> [session ids] for every session other than sid."""
+        """path -> [session ids] for every recently active session other than sid, in this checkout."""
         res: dict[str, list[str]] = {}
+        cutoff = time.time() - self.session_ttl()
         for f in self.sessions_dir.glob("*.txt"):
-            other = f.stem
-            if other == sid:
+            try:
+                if f.stem == sid or f.stat().st_mtime < cutoff:
+                    continue
+                lines = self.session_lines(f)
+            except OSError:
                 continue
-            for p in f.read_text().splitlines():
-                if p:
-                    res.setdefault(p, []).append(other)
+            for root, p in lines:
+                if root in (None, str(self.root)):
+                    res.setdefault(p, []).append(f.stem)
         return res
+
+    def live_sessions(self, ttl: float) -> dict[str, list[tuple[str, float]]]:
+        """realpath of a checkout -> [(session id, last edit time)] for sessions active within ttl seconds."""
+        res: dict[str, list[tuple[str, float]]] = {}
+        cutoff = time.time() - ttl
+        for f in self.sessions_dir.glob("*.txt"):
+            try:
+                mtime = f.stat().st_mtime
+                if mtime < cutoff:
+                    continue
+                roots = {r for r, _ in self.session_lines(f) if r}
+            except OSError:
+                continue
+            for root in roots:
+                res.setdefault(os.path.realpath(root), []).append((f.stem, mtime))
+        return res
+
+    def record_session(self, sid: str, root: Path | str, paths: list[str]):
+        """Append `root<TAB>path` lines. A repeat edit only refreshes the mtime, which is the liveness signal."""
+        f = self.sessions_dir / f"{sid}.txt"
+        have = set(f.read_text().splitlines()) if f.exists() else set()
+        new = [f"{root}\t{p}" for p in paths if f"{root}\t{p}" not in have]
+        if new:
+            with f.open("a") as fh:
+                fh.write("\n".join(new) + "\n")
+        elif f.exists():
+            os.utime(f, None)
+
+    def prune_sessions(self, days: float = SESSION_PRUNE_DAYS) -> int:
+        cutoff, n = time.time() - days * 86400, 0
+        for f in self.sessions_dir.glob("*.txt"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    n += 1
+            except OSError:
+                pass
+        return n
 
     # config --------------------------------------------------------------
     def config(self) -> dict:
@@ -227,11 +291,7 @@ def cmd_track(_args):
         return
     if rel.startswith(".."):
         return
-    f = repo.sessions_dir / f"{sid}.txt"
-    existing = repo.session_files(sid)
-    if rel not in existing:
-        with f.open("a") as fh:
-            fh.write(rel + "\n")
+    repo.record_session(sid, repo.root, [rel])
 
 
 # ─── plan ───────────────────────────────────────────────────────────────────
@@ -382,7 +442,12 @@ def cmd_start(args):
     if copied:
         steps.append(f"copied {len(copied)} .worktreeinclude file(s)")
 
-    # carry over the session's touched-file list so `plan` inside the worktree still works
+    # the moved files are now edited in the worktree: keep them ours there, so `plan` inside it still works
+    if applied:
+        repo.record_session(sid, os.path.realpath(wt_path), applied)
+    pruned = repo.prune_sessions()
+    if pruned:
+        steps.append(f"pruned {pruned} stale session file(s)")
     emit({
         "ok": True, "name": name, "branch": branch, "base": base, "base_sha": base_sha,
         "worktree": str(wt_path), "taken": applied, "copied": copied, "steps": steps,
@@ -439,9 +504,9 @@ def stacked_on(repo: Repo, branch: str, base: str, fork: str) -> list[str]:
     return alts
 
 
-def adopt_branch(repo: Repo, branch: str, wt_path: Path | None = None, base: str | None = None) -> dict:
-    """Record base and fork-point metadata for a worktree branch `start` did not create, so status, rebase,
-    verify and finish work on it. Refuses when the base is ambiguous instead of guessing."""
+def infer_base(repo: Repo, branch: str, base: str | None = None) -> tuple[str, str, str]:
+    """(base, why, fork point) for a worktree branch, read-only. Raises WtError when it cannot be told
+    unambiguously; the error carries `candidates` when the branch looks stacked on another."""
     how = "given with --base"
     if base is None:
         base, how = default_base(repo, branch)
@@ -463,6 +528,13 @@ def adopt_branch(repo: Repo, branch: str, wt_path: Path | None = None, base: str
             raise WtError(f"{branch} also contains commits of {', '.join(alts)}, so it may be stacked on one of "
                           f"them rather than on {base}; choose with `wt.py adopt --base <branch>`",
                           candidates=[base, *alts])
+    return base, how, fork
+
+
+def adopt_branch(repo: Repo, branch: str, wt_path: Path | None = None, base: str | None = None) -> dict:
+    """Record base and fork-point metadata for a worktree branch `start` did not create, so status, rebase,
+    verify and finish work on it. Refuses when the base is ambiguous instead of guessing."""
+    base, how, fork = infer_base(repo, branch, base)
     if wt_path is None:
         wt_path = next((Path(w["path"]) for w in repo.worktrees() if w.get("branch") == branch), None)
     repo.set_cfg(f"branch.{branch}.wtBase", base)
@@ -927,8 +999,128 @@ def cmd_abandon(args):
     emit({"ok": True, "steps": steps, "patch": str(patch_file) if patch_file else None})
 
 
-def cmd_list(_args):
+def assess_worktree(repo: Repo, w: dict, live: dict, now: float, ttl: float, min_age: float) -> dict:
+    """What `gc` needs to know about one linked worktree, and every reason it must not be removed."""
+    path, branch = w["path"], w.get("branch")
+    real = os.path.realpath(path)
+    inside = real.startswith(os.path.realpath(repo.main_root / WT_DIR) + os.sep)
+    managed = bool(branch and repo.cfg(f"branch.{branch}.wtBase"))
+    info: dict = {"path": path, "branch": branch, "origin": "wt" if managed else "claude" if inside else "external"}
+    why: list[str] = []
+    if not inside:
+        why.append("outside .claude/worktrees; not ours to remove")
+    if not branch:
+        why.append("detached HEAD")
+    if real == os.path.realpath(repo.root):
+        why.append("this is the current worktree")
+    gitdir = None
+    try:
+        wrepo = Repo(path)
+        gitdir, dirty = wrepo.gitdir, wrepo.status()
+        info["dirty"] = len(dirty)
+        if dirty:
+            why.append(f"{len(dirty)} uncommitted file(s)")
+        if wrepo.rebase_in_progress():
+            why.append("rebase in progress")
+    except WtError as e:
+        info["error"] = str(e)
+        why.append("cannot inspect the worktree")
+    base = None
+    if branch:
+        try:
+            if managed:
+                base = repo.cfg(f"branch.{branch}.wtBase")
+            else:
+                base, info["base_note"], _ = infer_base(repo, branch)
+        except WtError as e:
+            info["base_note"] = str(e)
+    info["base"] = base
+    if branch and base and repo.ref_exists(f"refs/heads/{base}"):
+        info["ahead"] = int(git("rev-list", "--count", f"{base}..{branch}", cwd=repo.root).strip())
+        info["behind"] = int(git("rev-list", "--count", f"{branch}..{base}", cwd=repo.root).strip())
+        # `git cherry` marks a commit `-` when the base has a patch-equivalent one (cherry-picked, rebased, squashed)
+        unmerged = [ln for ln in git("cherry", base, branch, cwd=repo.root).splitlines() if ln.startswith("+")]
+        info["merged"] = not unmerged
+        if unmerged:
+            why.append(f"{len(unmerged)} commit(s) not on {base}")
+    elif branch:
+        why.append("base unknown or ambiguous")
+    sessions = live.get(real, [])
+    info["live_sessions"] = [sid for sid, _ in sessions]
+    if sessions:
+        why.append(f"session {sessions[0][0][:8]} edited here within {ttl / 3600:g}h")
+    stamps = [t for _, t in sessions]
+    if branch:
+        stamps.append(float(git("log", "-1", "--format=%ct", branch, cwd=repo.root).strip() or 0))
+    if gitdir:  # not the index: even a read-only `git status` can rewrite it, which would look like activity
+        for name in ("HEAD", "logs/HEAD"):
+            try:
+                stamps.append((gitdir / name).stat().st_mtime)
+            except OSError:
+                pass
+    idle = max(0.0, now - max(stamps)) if stamps else 0.0
+    info["idle_hours"] = round(idle / 3600, 1)
+    if idle < min_age:
+        why.append(f"active {idle / 3600:.1f}h ago (min age {min_age / 3600:g}h)")
+    info["blockers"], info["gc_candidate"] = why, not why
+    return info
+
+
+def gc_min_age(repo: Repo, override: float | None) -> float:
+    return override if override is not None else float(repo.config().get("gcMinAgeHours", GC_MIN_AGE_HOURS))
+
+
+def assess_all(repo: Repo, min_age_hours: float) -> list[dict]:
+    ttl, now = repo.session_ttl(), time.time()
+    live = repo.live_sessions(ttl)
+    return [assess_worktree(repo, w, live, now, ttl, min_age_hours * 3600) for w in repo.worktrees()[1:]]
+
+
+def gc_remove(repo: Repo, info: dict, min_age_hours: float) -> dict:
+    """Remove one candidate. Re-checks it first (the lock is held, but sessions are not), never forces."""
+    w = next((x for x in repo.worktrees() if x["path"] == info["path"]), None)
+    if not w:
+        return {"path": info["path"], "skipped": ["worktree no longer exists"]}
+    ttl = repo.session_ttl()
+    fresh = assess_worktree(repo, w, repo.live_sessions(ttl), time.time(), ttl, min_age_hours * 3600)
+    if not fresh["gc_candidate"]:
+        return {"path": info["path"], "branch": info["branch"], "skipped": fresh["blockers"]}
+    rc, _, err = git_rc("worktree", "remove", info["path"], cwd=repo.main_root)
+    if rc:
+        return {"path": info["path"], "branch": info["branch"], "skipped": [f"git refused to remove it: {err.strip()}"]}
+    steps = [f"removed worktree {info['path']}"]
+    git("worktree", "prune", cwd=repo.main_root)
+    branch = info["branch"]
+    if repo.ref_exists(f"refs/heads/{branch}"):
+        git("branch", "-D", branch, cwd=repo.main_root)  # its commits are on the base: checked just above
+        steps.append(f"deleted branch {branch}")
+    git_rc("config", "--remove-section", f"branch.{branch}", cwd=repo.main_root)
+    return {"path": info["path"], "branch": branch, "steps": steps}
+
+
+def cmd_gc(args):
+    """Dry run unless --apply. A candidate is under .claude/worktrees, clean, fully merged into its base
+    (patch-equivalent counts), without a live session, and idle for at least the minimum age."""
     repo = Repo()
+    hours = gc_min_age(repo, args.min_age_hours)
+    items = assess_all(repo, hours)
+    cands = [i for i in items if i["gc_candidate"]]
+    removed = []
+    if args.apply and cands:
+        with landing_lock(repo, float(repo.config().get("lockTimeoutSec", LOCK_TIMEOUT))):
+            removed = [gc_remove(repo, i, hours) for i in cands]
+    keys = ("path", "branch", "base", "ahead", "behind", "idle_hours")
+    emit({"dry_run": not args.apply, "min_age_hours": hours,
+          "candidates": [{k: i.get(k) for k in keys} for i in cands], "removed": removed,
+          "kept": [{"path": i["path"], "branch": i["branch"], "why": i["blockers"]}
+                   for i in items if not i["gc_candidate"]]})
+
+
+def cmd_list(args):
+    repo = Repo()
+    if args.all:
+        hours = gc_min_age(repo, args.min_age_hours)
+        emit({"worktrees": assess_all(repo, hours), "main": str(repo.main_root), "min_age_hours": hours})
     out = git("for-each-ref", "--format=%(refname:short)", f"refs/heads/{BRANCH_PREFIX}*", cwd=repo.root)
     wts = {w.get("branch"): w["path"] for w in repo.worktrees()}
     items = []
@@ -973,7 +1165,12 @@ def main(argv=None):
     p.add_argument("--no-push", action="store_true", help="skip the push configured in .claude/wt.json")
     p = sub.add_parser("abandon", help="from main checkout: bring changes back (or discard) and remove worktree")
     p.add_argument("name"); p.add_argument("--discard", action="store_true")
-    sub.add_parser("list", help="list wt-* branches and their metadata")
+    p = sub.add_parser("list", help="list wt-* branches; --all: every linked worktree with its state and gc verdict")
+    p.add_argument("--all", action="store_true")
+    p.add_argument("--min-age-hours", type=float)
+    p = sub.add_parser("gc", help="remove idle, clean, merged worktrees under .claude/worktrees (dry run unless --apply)")
+    p.add_argument("--apply", action="store_true")
+    p.add_argument("--min-age-hours", type=float)
     args = ap.parse_args(argv)
     try:
         globals()[f"cmd_{args.cmd}"](args)

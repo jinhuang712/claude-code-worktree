@@ -318,4 +318,93 @@ printf 'merged\n' > "$W/shared.txt"
 OUT=$(cd "$W" && python3 "$WT" land)
 [ "$(echo "$OUT" | j "[d['state'], d['rebased']]")" = "['ready', False]" ] || fail "land after resolving: $OUT"
 echo "✓ land: conflict → exit 7, then a no-op rebase after continue"
+
+# ─── session tracking: a dead session or another worktree must not misclassify files ───
+age(){ python3 -c "import os,sys,time; t=time.time()-float(sys.argv[2])*3600; os.utime(sys.argv[1],(t,t))" "$1" "$2"; }
+sfile(){ f="$(git rev-parse --git-common-dir)/claude-wt/sessions/$1.txt"; mkdir -p "$(dirname "$f")"; echo "$f"; }
+trk(){ printf '{"session_id":"%s","cwd":"%s","tool_input":{"file_path":"%s"}}' "$1" "$2" "$3" | python3 "$WT" track; }
+groups(){ CLAUDE_CODE_SESSION_ID=$1 python3 "$WT" plan | j "{k: [e['path'] for e in d[k]] for k in ('ours','theirs','shared','unknown')}"; }
+THEIRS="{'ours': [], 'theirs': ['src/a.txt'], 'shared': [], 'unknown': []}"
+UNKNOWN="{'ours': [], 'theirs': [], 'shared': [], 'unknown': ['src/a.txt']}"
+
+newrepo tracking
+mkdir -p src; echo a > src/a.txt; git add -A; git commit -qm files; echo change >> src/a.txt
+trk OLD "$PWD" "$PWD/src/a.txt"
+[ "$(groups NEW)" = "$THEIRS" ] || fail "a recently active session's file is theirs: $(groups NEW)"
+age "$(sfile OLD)" 48
+[ "$(groups NEW)" = "$UNKNOWN" ] || fail "a session idle for 2 days must not claim the file: $(groups NEW)"
+trk OLD "$PWD" "$PWD/src/a.txt"
+[ "$(groups NEW)" = "$THEIRS" ] || fail "editing the same file again must refresh liveness: $(groups NEW)"
+echo "✓ stale sessions expire; a repeat edit keeps a session live"
+
+# the same relative path edited in another worktree is not the same file
+newrepo tracking2
+mkdir -p src; echo a > src/a.txt; git add -A; git commit -qm files
+W=$(wtstart other)
+echo x >> src/a.txt; trk MAIN "$PWD" "$PWD/src/a.txt"
+(cd "$W"; echo y >> src/a.txt; trk OTHER "$W" "$W/src/a.txt")
+[ "$(groups MAIN)" = "{'ours': ['src/a.txt'], 'theirs': [], 'shared': [], 'unknown': []}" ] || fail "another worktree's edit must not make it shared: $(groups MAIN)"
+echo "✓ edits in another worktree do not collide"
+
+# lines written before roots were kept still count while recent, and expire like the rest
+newrepo legacy
+echo l > l.txt; git add -A; git commit -qm l; echo m >> l.txt
+printf 'l.txt\n' > "$(sfile LEG)"
+[ "$(groups NEW)" = "{'ours': [], 'theirs': ['l.txt'], 'shared': [], 'unknown': []}" ] || fail "recent legacy line: $(groups NEW)"
+age "$(sfile LEG)" 48
+[ "$(groups NEW)" = "{'ours': [], 'theirs': [], 'shared': [], 'unknown': ['l.txt']}" ] || fail "stale legacy line: $(groups NEW)"
+echo "✓ legacy session lines"
+
+# start prunes week-old session files and keeps the moved files ours inside the worktree
+newrepo prune
+: > "$(sfile ANCIENT)"; age "$(sfile ANCIENT)" 240; : > "$(sfile RECENT)"
+echo c > c.txt; git add -A; git commit -qm c; echo more >> c.txt
+trk "$A" "$PWD" "$PWD/c.txt"
+W=$(CLAUDE_CODE_SESSION_ID=$A python3 "$WT" start carry --take c.txt | j "d['worktree']")
+[ ! -f "$(sfile ANCIENT)" ] && [ -f "$(sfile RECENT)" ] || fail "start must prune only files older than a week"
+[ "$(cd "$W" && CLAUDE_CODE_SESSION_ID=$A python3 "$WT" plan | j "[e['path'] for e in d['ours']]")" = "['c.txt']" ] || fail "moved files must stay ours in the worktree"
+echo "✓ start prunes old session files; taken files stay ours"
+
+# ─── list --all and gc ───
+blockers(){ echo "$OUT" | j "' | '.join(b for x in d['worktrees'] if x['branch']=='$1' for b in x['blockers'])"; }
+newrepo gc
+OLD="$(python3 -c 'import time; print(int(time.time()) - 3 * 86400, "+0000")')"                     # a landed worktree idle for 3 days
+W1=$(wtstart merged); (cd "$W1"; echo m1 > m1.txt; git add m1.txt; GIT_AUTHOR_DATE="$OLD" GIT_COMMITTER_DATE="$OLD" git commit -qm m1)
+python3 "$WT" finish --name merged --keep >/dev/null
+age "$(git rev-parse --git-common-dir)/worktrees/merged/HEAD" 72; age "$(git rev-parse --git-common-dir)/worktrees/merged/logs/HEAD" 72
+W2=$(wtstart dirty); echo junk > "$W2/junk.txt"                                                     # clean history, uncommitted file
+W3=$(wtstart unmerged); wtcommit "$W3" u1                                                           # commit not on main
+W4=$(wtstart squashed); wtcommit "$W4" s1; git cherry-pick "$(git -C "$W4" rev-parse HEAD)" >/dev/null   # same patch, other sha
+W5=$(wtstart live); trk sess-live "$W5" "$W5/x.txt"                                                 # a session just edited here
+git worktree add -q -b ext "$T/gc-ext"                                                              # outside .claude/worktrees
+git worktree add -q -b worktree-native .claude/worktrees/native                                     # built-in style, no metadata
+OUT=$(python3 "$WT" list --all --min-age-hours 0)
+[ "$(echo "$OUT" | j "len(d['worktrees'])")" = 7 ] || fail "list --all should show 7 worktrees: $OUT"
+blockers wt-dirty | grep -q "uncommitted" || fail "dirty: $(blockers wt-dirty)"
+blockers wt-unmerged | grep -q "not on main" || fail "unmerged: $(blockers wt-unmerged)"
+blockers wt-live | grep -q "session" || fail "live: $(blockers wt-live)"
+blockers ext | grep -q "outside .claude/worktrees" || fail "external: $(blockers ext)"
+[ -z "$(blockers wt-merged)$(blockers wt-squashed)$(blockers worktree-native)" ] || fail "these three have no blockers: merged=[$(blockers wt-merged)] squashed=[$(blockers wt-squashed)] native=[$(blockers worktree-native)]"
+echo "✓ list --all explains what blocks each worktree"
+
+OUT=$(python3 "$WT" gc)
+[ "$(echo "$OUT" | j "[c['branch'] for c in d['candidates']]")" = "['wt-merged']" ] || fail "with the 24h default only the idle merged worktree qualifies: $OUT"
+echo "$OUT" | grep -q "min age" || fail "recent worktrees must be kept for the minimum age: $OUT"
+OUT=$(python3 "$WT" gc --min-age-hours 0)
+[ "$(echo "$OUT" | j "sorted(c['branch'] for c in d['candidates'])")" = "['worktree-native', 'wt-merged', 'wt-squashed']" ] || fail "gc candidates: $OUT"
+[ "$(echo "$OUT" | j "d['dry_run']")" = True ] && [ -d "$W1" ] && [ -d "$W4" ] || fail "a dry run must remove nothing"
+echo "✓ gc dry run: merged, patch-equivalent and built-in worktrees are candidates; minimum age respected"
+
+OUT=$(python3 "$WT" gc --min-age-hours 0 --apply)
+[ "$(echo "$OUT" | j "len(d['removed'])")" = 3 ] || fail "gc --apply: $OUT"
+[ ! -d "$W1" ] && [ ! -d "$W4" ] && [ ! -d .claude/worktrees/native ] || fail "candidates must be removed"
+[ -z "$(git branch --list wt-merged wt-squashed worktree-native)" ] || fail "their branches must be deleted"
+[ -d "$W2" ] && [ -d "$W3" ] && [ -d "$W5" ] && [ -d "$T/gc-ext" ] || fail "dirty, unmerged, live and external worktrees must survive"
+[ -f s1.txt ] && [ -f m1.txt ] || fail "landed work must still be on main"
+echo "✓ gc --apply removes only the candidates"
+
+git worktree add -q -b worktree-cur .claude/worktrees/cur
+OUT=$(cd .claude/worktrees/cur && python3 "$WT" gc --min-age-hours 0)
+echo "$OUT" | j "[k['why'] for k in d['kept'] if k['branch']=='worktree-cur']" | grep -q "current worktree" || fail "gc must not offer the worktree it runs in: $OUT"
+echo "✓ gc leaves the current worktree alone"
 echo ALL PASS
