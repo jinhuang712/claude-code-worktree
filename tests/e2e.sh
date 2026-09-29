@@ -228,4 +228,94 @@ W=$(wtstart feat-s); wtcommit "$W" s
 OUT=$(python3 "$WT" finish --name feat-s)
 [ "$(echo "$OUT" | j "'push' in d")" = False ] && [ "$(git --git-dir="$T/nopush-origin.git" rev-parse main)" = "$BEFORE" ] || fail "no config, no push: $OUT"
 echo "✓ no push without the config"
+
+# ─── foreign worktrees: adopt them instead of failing ───
+# a plain `git worktree add`, outside .claude/worktrees, base moved: status adopts, finish rebases and lands
+newrepo foreign
+git worktree add -q -b foo "$T/foo-wt"
+(cd "$T/foo-wt"; echo f > f.txt; git add f.txt; git commit -qm f)
+echo M > m.txt; git add m.txt; git commit -qm "main m"
+ST=$(cd "$T/foo-wt" && python3 "$WT" status)
+[ "$(echo "$ST" | j "d['base']")" = main ] || fail "adopted base: $ST"
+echo "$ST" | j "d['adopted']['how']" | grep -q "main checkout" || fail "adoption reason: $ST"
+[ "$(echo "$ST" | j "[d['ahead'], d['behind']]")" = "[1, 1]" ] || fail "ahead/behind: $ST"
+ST=$(cd "$T/foo-wt" && python3 "$WT" status)
+[ "$(echo "$ST" | j "'adopted' in d")" = False ] || fail "adoption should be recorded once: $ST"
+OUT=$(python3 "$WT" finish --name foo)
+[ "$(echo "$OUT" | j "d['landed']")" = 1 ] && [ -f f.txt ] && [ -f m.txt ] || fail "foreign landing: $OUT"
+[ ! -d "$T/foo-wt" ] && [ -z "$(git branch --list foo)" ] || fail "foreign worktree and branch must be cleaned up"
+echo "✓ foreign worktree: adopted by status, lands via finish"
+
+# outside a linked worktree there is nothing to adopt
+set +e; OUT=$(python3 "$WT" status); RC=$?; set -e
+[ $RC -eq 1 ] && echo "$OUT" | grep -q "not inside a linked worktree" || fail "status in the main checkout: rc=$RC $OUT"
+
+# a built-in style worktree-<name> branch: finish --name finds it and adopts it from the main checkout
+newrepo native
+git worktree add -q -b worktree-bar "$T/native-bar"
+(cd "$T/native-bar"; echo b > b.txt; git add b.txt; git commit -qm b)
+OUT=$(python3 "$WT" finish --name bar)
+[ "$(echo "$OUT" | j "d['landed']")" = 1 ] && [ "$(echo "$OUT" | j "d['adopted']['base']")" = main ] || fail "worktree-<name>: $OUT"
+[ ! -d "$T/native-bar" ] || fail "worktree-<name> worktree not removed"
+echo "✓ worktree-<name> branch resolved and adopted by finish"
+
+# a wt-* branch without metadata, through `land`
+newrepo nometa
+git worktree add -q -b wt-baz "$T/nometa-baz"
+(cd "$T/nometa-baz"; echo z > z.txt; git add z.txt; git commit -qm z)
+OUT=$(cd "$T/nometa-baz" && python3 "$WT" land)
+[ "$(echo "$OUT" | j "[d['state'], d['adopted']['base'], d['finish']]")" = "['ready', 'main', 'baz']" ] || fail "wt-* without metadata: $OUT"
+OUT=$(python3 "$WT" finish --name baz)
+[ "$(echo "$OUT" | j "d['landed']")" = 1 ] || fail "landing the adopted wt-* branch: $OUT"
+echo "✓ wt-* without metadata adopted by land"
+
+# stacked on another branch: refuse to guess, offer candidates, then adopt --base
+newrepo stacked
+git switch -q -c feat-x; echo x > x.txt; git add x.txt; git commit -qm x1; git switch -q main
+git worktree add -q -b child "$T/child-wt" feat-x
+(cd "$T/child-wt"; echo c > c.txt; git add c.txt; git commit -qm c1)
+set +e; OUT=$(cd "$T/child-wt" && python3 "$WT" status); RC=$?; set -e
+[ $RC -eq 1 ] && echo "$OUT" | grep -q stacked || fail "stacked branch must be refused: rc=$RC $OUT"
+[ "$(echo "$OUT" | j "sorted(d['candidates'])")" = "['feat-x', 'main']" ] || fail "candidates: $OUT"
+[ -z "$(git config --get branch.child.wtBase || true)" ] || fail "nothing may be recorded when adoption is refused"
+OUT=$(cd "$T/child-wt" && python3 "$WT" adopt --base feat-x)
+[ "$(echo "$OUT" | j "[d['base'], d['adopted']['ahead']]")" = "['feat-x', 1]" ] || fail "adopt --base: $OUT"
+echo "✓ stacked branch refused, adopt --base resolves it"
+
+# abandon works on a foreign worktree too
+newrepo abandonforeign
+git worktree add -q -b old "$T/old-wt"
+(cd "$T/old-wt"; echo n > n.txt; git add n.txt; git commit -qm n; echo w > w.txt)
+OUT=$(python3 "$WT" abandon old)
+[ -f n.txt ] && [ -f w.txt ] && [ ! -d "$T/old-wt" ] || fail "abandon foreign: $OUT"
+echo "✓ abandon on a foreign worktree"
+
+# ─── land: rebase + verify in one call ───
+newrepo landing
+mkdir -p .claude; echo '{"test":"test ! -f poison.txt"}' > .claude/wt.json; git add -A; git commit -qm cfg
+W=$(wtstart feat-l); wtcommit "$W" l
+echo M > m.txt; git add m.txt; git commit -qm "main m"
+OUT=$(cd "$W" && python3 "$WT" land)
+[ "$(echo "$OUT" | j "[d['state'], d['rebased'], d['verify']['configured'], d['finish']]")" = "['ready', True, True, 'feat-l']" ] || fail "land ready: $OUT"
+echo x > "$W/dirty.txt"
+set +e; OUT=$(cd "$W" && python3 "$WT" land); RC=$?; set -e
+[ $RC -eq 1 ] && echo "$OUT" | grep -q dirty.txt || fail "land with a dirty worktree: rc=$RC $OUT"
+rm "$W/dirty.txt"
+echo p > poison.txt; git add poison.txt; git commit -qm poison
+set +e; OUT=$(cd "$W" && python3 "$WT" land); RC=$?; set -e
+[ $RC -eq 8 ] || fail "land with a red test: rc=$RC $OUT"
+echo "✓ land: ready, dirty → exit 1, red test → exit 8"
+
+newrepo landconflict
+echo x > shared.txt; git add -A; git commit -qm shared
+W=$(wtstart feat-m)
+(cd "$W"; echo wt > shared.txt; git add -A; git commit -qm "wt shared")
+echo main > shared.txt; git add -A; git commit -qm "main shared"
+set +e; OUT=$(cd "$W" && python3 "$WT" land); RC=$?; set -e
+[ $RC -eq 7 ] || fail "land with a conflict: rc=$RC $OUT"
+printf 'merged\n' > "$W/shared.txt"
+(cd "$W"; python3 "$WT" continue >/dev/null)
+OUT=$(cd "$W" && python3 "$WT" land)
+[ "$(echo "$OUT" | j "[d['state'], d['rebased']]")" = "['ready', False]" ] || fail "land after resolving: $OUT"
+echo "✓ land: conflict → exit 7, then a no-op rebase after continue"
 echo ALL PASS

@@ -29,6 +29,7 @@ STASH_TAG = "wt:"
 CONFIG_FILE = ".claude/wt.json"
 DIFF_LIMIT = 6000  # chars of diff context per conflicted file
 LOCK_TIMEOUT = 300  # seconds `finish` waits for another landing; override with "lockTimeoutSec"
+MAX_STACK_CHECK = 200  # local branches examined when deciding whether a foreign worktree is stacked
 PUSH_TIMEOUT = 120  # seconds `git push` may take after landing; below LOCK_TIMEOUT so a hung remote frees the lock
 
 
@@ -403,6 +404,96 @@ def wt_meta(repo: Repo, branch: str) -> dict:
     }
 
 
+def default_base(repo: Repo, branch: str) -> tuple[str | None, str]:
+    """Best guess at the branch a foreign worktree should land on, and why."""
+    rc, out, _ = git_rc("symbolic-ref", "--quiet", "--short", "HEAD", cwd=repo.main_root)
+    cur = out.strip() if rc == 0 else None
+    if cur and cur != branch:
+        return cur, "the branch checked out in the main checkout"
+    rc, out, _ = git_rc("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD", cwd=repo.root)
+    head = out.strip().removeprefix("origin/") if rc == 0 else None
+    if head and head != branch and repo.ref_exists(f"refs/heads/{head}"):
+        return head, "origin's default branch"
+    for b in ("main", "master"):
+        if b != branch and repo.ref_exists(f"refs/heads/{b}"):
+            return b, f"the branch named {b}"
+    return None, ""
+
+
+def stacked_on(repo: Repo, branch: str, base: str, fork: str) -> list[str]:
+    """Other local branches whose commits `branch` also contains beyond the fork point. Landing on `base`
+    would drag those commits along, so the real base is probably one of them."""
+    alts = []
+    refs = git("for-each-ref", "--format=%(refname:short)", "refs/heads", cwd=repo.root).split()
+    for other in refs[:MAX_STACK_CHECK]:
+        if other in (branch, base):
+            continue
+        rc, mb, _ = git_rc("merge-base", other, branch, cwd=repo.root)
+        mb = mb.strip()
+        if rc or not mb or mb == fork:
+            continue
+        if git_rc("merge-base", "--is-ancestor", branch, other, cwd=repo.root)[0] == 0:
+            continue  # `other` was built on top of `branch`, so it cannot be its base
+        if git_rc("merge-base", "--is-ancestor", fork, mb, cwd=repo.root)[0] == 0:
+            alts.append(other)
+    return alts
+
+
+def adopt_branch(repo: Repo, branch: str, wt_path: Path | None = None, base: str | None = None) -> dict:
+    """Record base and fork-point metadata for a worktree branch `start` did not create, so status, rebase,
+    verify and finish work on it. Refuses when the base is ambiguous instead of guessing."""
+    how = "given with --base"
+    if base is None:
+        base, how = default_base(repo, branch)
+        if not base:
+            raise WtError(f"cannot infer which branch {branch} should land on; run `wt.py adopt --base <branch>`")
+    if base == branch or not repo.ref_exists(f"refs/heads/{base}"):
+        raise WtError(f"base branch {base} is not usable for {branch}; run `wt.py adopt --base <branch>`")
+    rc, out, _ = git_rc("merge-base", "--all", base, branch, cwd=repo.root)
+    forks = out.split()
+    if rc or not forks:
+        raise WtError(f"{branch} and {base} share no history")
+    if len(forks) > 1:
+        raise WtError(f"{branch} and {base} have more than one merge base (criss-cross history), which "
+                      "/wt:land cannot rebase safely; land it by hand")
+    fork = forks[0]
+    if how != "given with --base":
+        alts = stacked_on(repo, branch, base, fork)
+        if alts:
+            raise WtError(f"{branch} also contains commits of {', '.join(alts)}, so it may be stacked on one of "
+                          f"them rather than on {base}; choose with `wt.py adopt --base <branch>`",
+                          candidates=[base, *alts])
+    if wt_path is None:
+        wt_path = next((Path(w["path"]) for w in repo.worktrees() if w.get("branch") == branch), None)
+    repo.set_cfg(f"branch.{branch}.wtBase", base)
+    repo.set_cfg(f"branch.{branch}.wtBaseSha", fork)
+    repo.set_cfg(f"branch.{branch}.wtSession",
+                 os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDE_SESSION_ID") or "")
+    repo.set_cfg(f"branch.{branch}.wtPath", str(wt_path or ""))
+    m = wt_meta(repo, branch)
+    m["adopted"] = {"base": base, "how": how, "fork": fork,
+                    "ahead": int(git("rev-list", "--count", f"{fork}..{branch}", cwd=repo.root).strip())}
+    return m
+
+
+def meta_or_adopt(repo: Repo, branch: str) -> dict:
+    if repo.cfg(f"branch.{branch}.wtBase"):
+        return wt_meta(repo, branch)
+    return adopt_branch(repo, branch)
+
+
+def resolve_branch(repo: Repo, name: str) -> str:
+    """`wt-<name>` first (what `start` makes), then the branch named exactly `name`, then `worktree-<name>`
+    (what the built-in EnterWorktree makes)."""
+    raw, tried = name.strip(), []
+    for cand in (BRANCH_PREFIX + sanitize(raw), raw, "worktree-" + raw.removeprefix("worktree-")):
+        if cand not in tried:
+            tried.append(cand)
+            if repo.ref_exists(f"refs/heads/{cand}"):
+                return cand
+    raise WtError(f"no branch found for {name!r} (tried {', '.join(tried)})")
+
+
 def current_wt(repo: Repo) -> dict:
     br = repo.branch()
     if br is None:  # detached during an in-progress rebase: recover the branch being rebased
@@ -410,9 +501,25 @@ def current_wt(repo: Repo) -> dict:
             hn = repo.gitdir / d / "head-name"
             if hn.exists():
                 br = hn.read_text().strip().removeprefix("refs/heads/")
-    if not br or not br.startswith(BRANCH_PREFIX):
-        raise WtError(f"not on a {BRANCH_PREFIX}* branch (on {br}); run this inside the worktree")
-    return wt_meta(repo, br)
+    if not br:
+        raise WtError("HEAD is detached; run this inside a worktree that is on a branch")
+    if repo.cfg(f"branch.{br}.wtBase"):
+        return wt_meta(repo, br)
+    if repo.root == repo.main_root:
+        raise WtError(f"not inside a linked worktree (on {br}); run this inside the worktree")
+    return adopt_branch(repo, br, repo.root)
+
+
+def cmd_adopt(args):
+    repo = Repo()
+    if args.name:
+        branch = resolve_branch(repo, args.name)
+        wt = next((Path(w["path"]) for w in repo.worktrees() if w.get("branch") == branch), None)
+    else:
+        branch, wt = repo.branch(), repo.root
+        if not branch or repo.root == repo.main_root:
+            raise WtError("run `adopt` inside a linked worktree that is on a branch, or pass --name")
+    emit({"ok": True, **adopt_branch(repo, branch, wt, args.base)})
 
 
 def base_checkout(repo: Repo, base: str) -> str | None:
@@ -577,6 +684,24 @@ def cmd_verify(args):
     emit(*do_verify(repo, current_wt(repo)))
 
 
+def cmd_land(args):
+    """Everything in phase A after the commit, in one call: adopt if needed, rebase onto the base, verify.
+    A dirty worktree exits 1, conflicts exit 7, a red check/test exits 8; nothing is landed here."""
+    repo = Repo()
+    m = current_wt(repo)
+    report, code = do_rebase(repo, m, args.onto)
+    if code:
+        emit(report, code)
+    verdict, vcode = do_verify(repo, dict(m))
+    if vcode:
+        emit({**verdict, "rebased": not report.get("noop", False)}, vcode)
+    emit({"state": "ready", **m, "base_sha": report["base_sha"], "rebased": not report.get("noop", False),
+          "commits": report["commits"], "worktree": str(repo.root),
+          "verify": {"configured": verdict["configured"], "results": verdict["results"]},
+          "finish": m["branch"].removeprefix(BRANCH_PREFIX),
+          "next": "ExitWorktree, then `wt.py finish --name <finish>`"})
+
+
 # ─── finish ─────────────────────────────────────────────────────────────────
 
 def cleanup(repo: Repo, m: dict, force_branch: bool) -> list[str]:
@@ -690,13 +815,10 @@ def push_base(repo: Repo, base: str, remote: str, where: str | None) -> dict:
 
 def cmd_finish(args):
     repo = Repo()
-    name = sanitize(args.name)
-    branch = BRANCH_PREFIX + name
+    branch = resolve_branch(repo, args.name)
     if repo.branch() == branch:
         raise WtError("run `finish` from the main checkout after ExitWorktree, not inside the worktree")
-    if not repo.ref_exists(f"refs/heads/{branch}"):
-        raise WtError(f"branch {branch} does not exist")
-    m = wt_meta(repo, branch)
+    m = meta_or_adopt(repo, branch)
     base = m["base"]
     if not repo.ref_exists(f"refs/heads/{base}"):
         raise WtError(f"base branch {base} no longer exists; pass --onto <branch> to `wt.py rebase` inside the worktree first")
@@ -767,7 +889,8 @@ def finish_locked(repo: Repo, args, m: dict, branch: str):
     if not args.keep:
         steps += cleanup(repo, m, force_branch=force_branch)
     out = {"ok": True, "landed": len(commits), "base": base, "base_now": repo.sha(base),
-           "commits": commits, "steps": steps, "kept": bool(args.keep), **(rebased or {})}
+           "commits": commits, "steps": steps, "kept": bool(args.keep), **(rebased or {}),
+           **({"adopted": m["adopted"]} if "adopted" in m else {})}
     if push:
         out["push"] = push
     emit(out, EXIT_OK if not push or push["ok"] else EXIT_PUSH)
@@ -777,17 +900,11 @@ def finish_locked(repo: Repo, args, m: dict, branch: str):
 
 def cmd_abandon(args):
     repo = Repo()
-    name = sanitize(args.name)
-    branch = BRANCH_PREFIX + name
+    branch = resolve_branch(repo, args.name)
     if repo.branch() == branch:
         raise WtError("run `abandon` from the main checkout, not inside the worktree")
-    if not repo.ref_exists(f"refs/heads/{branch}"):
-        raise WtError(f"branch {branch} does not exist")
-    m = wt_meta(repo, branch)
-    wt_path = None
-    for w in repo.worktrees():
-        if w.get("branch") == branch:
-            wt_path = Path(w["path"])
+    m = meta_or_adopt(repo, branch)
+    wt_path = worktree_of(repo, m)
     steps, patch_file = [], None
     if not args.discard:
         fork = m["base_sha"]
@@ -797,7 +914,7 @@ def cmd_abandon(args):
         else:
             patch = git("diff", "--binary", fork, branch, cwd=repo.root)
         if patch.strip():
-            patch_file = repo.common / "claude-wt" / f"abandon-{name}.patch"
+            patch_file = repo.common / "claude-wt" / f"abandon-{sanitize(branch)}.patch"
             patch_file.parent.mkdir(parents=True, exist_ok=True)
             patch_file.write_text(patch)
             rc, out, err = git_rc("apply", "--3way", str(patch_file), cwd=repo.root)
@@ -845,7 +962,12 @@ def main(argv=None):
     p.add_argument("--onto", help="override base branch (e.g. when the original was deleted)")
     sub.add_parser("continue", help="inside worktree: after resolving conflicts")
     sub.add_parser("verify", help="inside worktree: run .claude/wt.json check/test")
-    p = sub.add_parser("finish", help="from main checkout: ff-merge wt-<name> into base and clean up")
+    p = sub.add_parser("adopt", help="record base/fork metadata for a worktree branch start did not create")
+    p.add_argument("--base", help="branch it should land on (default: inferred; refuses when ambiguous)")
+    p.add_argument("--name", help="branch name, to adopt from the main checkout instead of inside the worktree")
+    p = sub.add_parser("land", help="inside worktree: adopt if needed, rebase onto base, verify (before finish)")
+    p.add_argument("--onto", help="override base branch (e.g. when the original was deleted)")
+    p = sub.add_parser("finish", help="from main checkout: ff-merge a worktree branch into its base and clean up")
     p.add_argument("--name", required=True); p.add_argument("--squash", action="store_true")
     p.add_argument("--message", "-m"); p.add_argument("--keep", action="store_true")
     p.add_argument("--no-push", action="store_true", help="skip the push configured in .claude/wt.json")
