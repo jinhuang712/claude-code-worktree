@@ -1,6 +1,6 @@
 ---
 name: land
-description: Land the current wt-* worktree back onto the branch it was forked from - commit, rebase onto the (possibly moved) base, resolve conflicts, verify, fast-forward, clean up. Use when the user says /wt:land, "land 回去", "合回原分支", or is done with worktree work.
+description: Land the current worktree (a wt-* one, or any linked worktree branch) back onto the branch it was forked from - commit, rebase onto the (possibly moved) base, resolve conflicts, verify, fast-forward, clean up. Use when the user says /wt:land, "land 回去", "合回原分支", or is done with worktree work.
 argument-hint: "[--squash] [--keep] — squash into one commit; keep worktree after landing"
 allowed-tools:
   - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/wt.py" *)
@@ -22,21 +22,26 @@ allowed-tools:
 
 ## Phase A — inside the worktree
 
-### A1. Status
+### A1. Land check
 
 ```bash
-python3 "$WT" status
+python3 "$WT" land              # adopt if needed, rebase onto the base, run check/test
 ```
 
-If `dirty` is non-empty: review `git diff`, then commit with a real message describing the change (one commit per logical change is fine). Use commands the worktree isolation guard accepts: `git add <paths>`, then `git commit -q -m "<subject>" -m "<body>"`, or write the message to a file with the Write tool and run `git commit -q -F <file>`. A heredoc (`<<EOF`, `-F -`), `cd`, or `$(…)` is refused as "too complex to verify" and costs a turn. If `base_exists` is false, ask the user which branch to land on and pass it to `rebase --onto <branch>`.
+| exit | meaning | what to do |
+|---|---|---|
+| 0 | `"state": "ready"`: rebased and verified | go to Phase B; pass the `finish` field to `finish --name` |
+| 1 | an error; `dirty` lists uncommitted files | review `git diff`, commit (below), run `land` again. If `base_exists` is false, ask the user which branch to land on and run `land --onto <branch>`. |
+| 7 | rebase conflicts | A2 |
+| 8 | check/test failed | A3 |
 
-### A2. Rebase
+To commit, use commands the worktree isolation guard accepts: `git add <paths>`, then `git commit -q -m "<subject>" -m "<body>"`, or write the message to a file with the Write tool and run `git commit -q -F <file>`. Write a real message describing the change (one commit per logical change is fine). A heredoc (`<<EOF`, `-F -`), `cd`, or `$(…)` is refused as "too complex to verify" and costs a turn.
 
-```bash
-python3 "$WT" rebase            # exit 0: rebased/no-op · exit 7: conflicts · exit 1: error
-```
+**Worktrees `/wt:worktree` did not create** (a plain `git worktree add`, the built-in `EnterWorktree`, a `wt-*` branch without metadata) are adopted automatically. When the JSON has `adopted`, tell the user which base was inferred (`adopted.base`, `adopted.how`) before going on. If it fails with `candidates`, the branch also contains another branch's commits and may be stacked: ask with AskUserQuestion which candidate it should land on, run `python3 "$WT" adopt --base <branch>`, then `land` again.
 
-### A3. Conflicts (exit 7) — resolve, never abort
+`status`, `rebase` and `verify` still exist if you need one step on its own.
+
+### A2. Conflicts (exit 7) — resolve, never abort
 
 The JSON lists every conflicted file with `kind`, `base_commits`/`base_diff` (what the base branch did since the fork) and `worktree_commits`/`worktree_diff` (what we did). Roles are swapped during rebase: `<<<<<<< HEAD/ours` is the **base**, `>>>>>>> theirs` is **our** worktree commit.
 
@@ -53,15 +58,11 @@ Then:
 python3 "$WT" continue          # stages resolved files, runs `git rebase --continue`
 ```
 
-Repeat A3 while the exit code is 7 (multi-commit rebases conflict per commit). Never run `git rebase --abort` or `git rebase --skip` on your own; if a conflict is beyond you, stop, leave everything in place, and explain.
+Repeat while the exit code is 7 (multi-commit rebases conflict per commit); once `continue` succeeds, run `land` again (a no-op rebase, then check/test). Never run `git rebase --abort` or `git rebase --skip` on your own; if a conflict is beyond you, stop, leave everything in place, and explain.
 
-### A4. Verify
+### A3. Red check/test (exit 8)
 
-```bash
-python3 "$WT" verify            # runs .claude/wt.json "check" then "test"; exit 8 on failure
-```
-
-On exit 8: fix the failure in the worktree, commit, re-run `rebase` (no-op) and `verify`. Do not land red.
+`land` runs `.claude/wt.json` `check` then `test`. Fix the failure in the worktree, commit, run `land` again. Do not land red.
 
 ## Phase B — main checkout
 
@@ -75,13 +76,13 @@ Call `ExitWorktree`. If it offers to remove the worktree, either answer is fine;
 python3 "$WT" finish --name <name> [--squash -m "<message>"] [--keep] [--no-push]
 ```
 
-`<name>` is the branch without the `wt-` prefix (from `status`). The script takes a per-repo landing lock. If the base moved since your rebase (another session landed first) it rebases in place and re-runs check/test, so you do not go back into the worktree for that. It then fast-forwards the base wherever it is checked out (or moves the ref if nowhere), verifies the worktree head is an ancestor of base, pushes the base if `push` is set in `.claude/wt.json`, then removes the worktree, branch, metadata and any leftover stash. With `--squash` you must supply a commit message summarising all landed commits.
+`<name>` is the `finish` field from `land` (the branch without its `wt-` prefix; `finish` also finds `worktree-<name>` and exact branch names). The script takes a per-repo landing lock. If the base moved since your rebase (another session landed first) it rebases in place and re-runs check/test, so you do not go back into the worktree for that. It then fast-forwards the base wherever it is checked out (or moves the ref if nowhere), verifies the worktree head is an ancestor of base, pushes the base if `push` is set in `.claude/wt.json`, then removes the worktree, branch, metadata and any leftover stash. With `--squash` you must supply a commit message summarising all landed commits.
 
 Exit codes from `finish`:
 
 | exit | meaning | what to do |
 |---|---|---|
-| 7 | the base moved and the in-place rebase conflicts; nothing landed, the worktree is left mid-rebase | `EnterWorktree` with the `worktree` path from the JSON, go back to A3, `ExitWorktree`, run `finish` again |
+| 7 | the base moved and the in-place rebase conflicts; nothing landed, the worktree is left mid-rebase | `EnterWorktree` with the `worktree` path from the JSON, go back to A2, `ExitWorktree`, run `finish` again |
 | 8 | check/test fail on the rebased tree; nothing landed | `EnterWorktree`, fix, commit, `ExitWorktree`, run `finish` again |
 | 9 | landed and cleaned up, but the push failed | report `push.error`; never force-push; usually the remote moved, so tell the user |
 

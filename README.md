@@ -5,9 +5,13 @@ Two skills and one script:
 | | what it does |
 |---|---|
 | `/wt:worktree [name]` | From the current branch, fork `wt-<name>` into `.claude/worktrees/<name>`, moving **only this session's** uncommitted changes there. Other sessions' dirty files stay put. Then `EnterWorktree`. |
-| `/wt:land [--squash] [--keep]` | Commit, rebase onto the base branch (which may have moved), let Claude resolve conflicts with structured context, run `check`/`test`, `ExitWorktree`, fast-forward the base, clean up. |
+| `/wt:land [--squash] [--keep]` | Commit, rebase onto the base branch (which may have moved), let Claude resolve conflicts with structured context, run `check`/`test`, `ExitWorktree`, fast-forward the base, clean up. Works on any linked worktree, not only ones `/wt:worktree` made. |
 
 Why not the native `EnterWorktree` alone? It forks from `origin/HEAD` by default, cannot name the branch, does not remember which branch you forked from, and has no land step.
+
+### Worktrees the plugin did not create
+
+A plain `git worktree add`, the built-in `EnterWorktree` (`worktree-<name>` branches) or a `wt-*` branch without metadata is **adopted** the first time `land`, `status`, `finish` or `abandon` meets it. The base is the branch checked out in the main checkout, the fork point is the merge-base, and the JSON says so in `adopted`. It refuses to guess when the branch also contains another local branch's commits (it may be stacked): the error lists `candidates`, and `wt.py adopt --base <branch>` settles it. `finish --name <n>` finds `wt-<n>`, then a branch named exactly `<n>`, then `worktree-<n>`.
 
 ## How "only our changes" works
 
@@ -62,4 +66,4 @@ MIT. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## Script
 
-`scripts/wt.py` (Python 3, stdlib only). Subcommands: `track plan start status rebase continue verify finish abandon list`. Exit codes: 0 ok · 1 error · 7 conflicts pending · 8 verify failed · 9 landed but push failed. Tests: `tests/e2e.sh`.
+`scripts/wt.py` (Python 3, stdlib only). Subcommands: `track plan start status adopt land rebase continue verify finish abandon list`. `land` is `adopt` + `rebase` + `verify` in one call. Exit codes: 0 ok · 1 error · 7 conflicts pending · 8 verify failed · 9 landed but push failed. Tests: `tests/e2e.sh`.
