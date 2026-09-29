@@ -6,6 +6,7 @@ Exit codes: 0 ok · 1 error/precondition · 7 merge conflicts pending · 8 verif
 """
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import json
 import os
@@ -13,7 +14,13 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # no flock (Windows): landings are then not serialized
+    fcntl = None
 
 EXIT_OK, EXIT_ERR, EXIT_CONFLICT, EXIT_VERIFY = 0, 1, 7, 8
 BRANCH_PREFIX = "wt-"
@@ -21,6 +28,7 @@ WT_DIR = ".claude/worktrees"
 STASH_TAG = "wt:"
 CONFIG_FILE = ".claude/wt.json"
 DIFF_LIMIT = 6000  # chars of diff context per conflicted file
+LOCK_TIMEOUT = 300  # seconds `finish` waits for another landing; override with "lockTimeoutSec"
 
 
 class WtError(Exception):
@@ -483,28 +491,32 @@ def finish_rebase_ok(repo: Repo, m: dict) -> dict:
             "next": "`wt.py verify` (if check/test configured), then ExitWorktree and `wt.py finish --name <name>`"}
 
 
-def cmd_rebase(args):
-    repo = Repo()
-    m = current_wt(repo)
+def do_rebase(repo: Repo, m: dict, onto: str | None = None) -> tuple[dict, int]:
+    """Rebase the worktree's branch onto its base. Returns (report, exit code); raises WtError."""
     if repo.rebase_in_progress():
-        emit(conflict_report(repo, m), EXIT_CONFLICT)
+        return conflict_report(repo, m), EXIT_CONFLICT
     if repo.status():
         raise WtError("worktree is dirty; commit (or stash) before rebasing",
                       dirty=[it["path"] for it in repo.status()])
     if not repo.ref_exists(f"refs/heads/{m['base']}"):
         raise WtError(f"base branch {m['base']} no longer exists; use `wt.py rebase --onto <branch>`")
-    if args.onto:
-        m["base"] = args.onto
-        repo.set_cfg(f"branch.{m['branch']}.wtBase", args.onto)
+    if onto:
+        m["base"] = onto
+        repo.set_cfg(f"branch.{m['branch']}.wtBase", onto)
     base_now = repo.sha(m["base"])
     if git_rc("merge-base", "--is-ancestor", base_now, "HEAD", cwd=repo.root)[0] == 0:
-        emit({**finish_rebase_ok(repo, m), "noop": True})
+        return {**finish_rebase_ok(repo, m), "noop": True}, EXIT_OK
     rc, out, err = git_rc("rebase", "--onto", m["base"], m["base_sha"], m["branch"], cwd=repo.root)
     if rc == 0:
-        emit(finish_rebase_ok(repo, m))
+        return finish_rebase_ok(repo, m), EXIT_OK
     if repo.rebase_in_progress():
-        emit(conflict_report(repo, m), EXIT_CONFLICT)
+        return conflict_report(repo, m), EXIT_CONFLICT
     raise WtError(f"rebase failed: {err.strip()}")
+
+
+def cmd_rebase(args):
+    repo = Repo()
+    emit(*do_rebase(repo, current_wt(repo), args.onto))
 
 
 def cmd_continue(args):
@@ -543,9 +555,8 @@ def run_shell(cmd: str, cwd: Path) -> dict:
     return {"cmd": cmd, "rc": p.returncode, "output_tail": tail}
 
 
-def cmd_verify(args):
-    repo = Repo()
-    m = current_wt(repo)
+def do_verify(repo: Repo, m: dict) -> tuple[dict, int]:
+    """Run .claude/wt.json check then test in the worktree. Returns (report, exit code)."""
     cfg = repo.config()
     results, failed = [], False
     for key in ("check", "test"):
@@ -556,8 +567,13 @@ def cmd_verify(args):
             if r["rc"]:
                 failed = True
                 break
-    emit({"state": "verify-failed" if failed else "verified", **m, "results": results,
-          "configured": bool(results)}, EXIT_VERIFY if failed else EXIT_OK)
+    return ({"state": "verify-failed" if failed else "verified", **m, "results": results,
+             "configured": bool(results)}, EXIT_VERIFY if failed else EXIT_OK)
+
+
+def cmd_verify(args):
+    repo = Repo()
+    emit(*do_verify(repo, current_wt(repo)))
 
 
 # ─── finish ─────────────────────────────────────────────────────────────────
@@ -584,6 +600,69 @@ def cleanup(repo: Repo, m: dict, force_branch: bool) -> list[str]:
     return steps
 
 
+@contextlib.contextmanager
+def landing_lock(repo: Repo, timeout: float):
+    """Serialize `finish` across every session sharing this repository (flock on .git/claude-wt/land.lock)."""
+    if fcntl is None:
+        yield
+        return
+    path = repo.common / "claude-wt" / "land.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = path.open("a+")
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise WtError(f"another landing has held {path} for {timeout:g}s; retry in a moment")
+                time.sleep(0.2)
+        yield
+    finally:
+        fh.close()  # closing the descriptor releases the lock
+
+
+def worktree_of(repo: Repo, m: dict) -> Path | None:
+    """The worktree holding m['branch']. Mid-rebase its HEAD is detached and git lists no branch for it,
+    so fall back to the path recorded by `start`."""
+    wts = repo.worktrees()
+    for w in wts:
+        if w.get("branch") == m["branch"]:
+            return Path(w["path"])
+    rec = m.get("path")
+    if rec:
+        for w in wts:
+            if os.path.realpath(w["path"]) == os.path.realpath(rec):
+                return Path(w["path"])
+    return None
+
+
+def conflict_stop(wt_path: Path, report: dict, why: str):
+    """Exit 7 from `finish`: the worktree is mid-rebase and needs a session inside it."""
+    emit({**report, "landed": False, "worktree": str(wt_path),
+          "next": f"{why}; EnterWorktree(path=\"{wt_path}\"), resolve the files above, `wt.py continue`, "
+                  "ExitWorktree, then `wt.py finish` again"}, EXIT_CONFLICT)
+
+
+def rebase_before_landing(m: dict, wt_path: Path) -> dict:
+    """The base moved after the worktree's own rebase (another session landed first). Redo the rebase in
+    place under the landing lock instead of bouncing the session back into the worktree. Conflicts stop
+    with exit 7, a failing check/test with exit 8; nothing is landed in either case."""
+    wrepo = Repo(str(wt_path))
+    behind = int(git("rev-list", "--count", f"{m['branch']}..{m['base']}", cwd=wrepo.root).strip())
+    report, code = do_rebase(wrepo, dict(m))
+    if code == EXIT_CONFLICT:
+        conflict_stop(wt_path, report, f"{m['base']} moved while landing and the rebase conflicts")
+    verdict, vcode = do_verify(wrepo, dict(m))
+    if vcode:
+        emit({**verdict, "landed": False, "rebased_during_finish": True, "worktree": str(wt_path),
+              "next": f"{m['base']} moved while landing and check/test fail on the rebased tree; fix it in the "
+                      "worktree, commit, then `wt.py finish` again"}, vcode)
+    return {"rebased_during_finish": True, "base_moved_by": behind, "verified": verdict["configured"]}
+
+
 def cmd_finish(args):
     repo = Repo()
     name = sanitize(args.name)
@@ -596,16 +675,26 @@ def cmd_finish(args):
     base = m["base"]
     if not repo.ref_exists(f"refs/heads/{base}"):
         raise WtError(f"base branch {base} no longer exists; pass --onto <branch> to `wt.py rebase` inside the worktree first")
+    with landing_lock(repo, float(repo.config().get("lockTimeoutSec", LOCK_TIMEOUT))):
+        finish_locked(repo, args, m, branch)
 
-    wt_path = None
-    for w in repo.worktrees():
-        if w.get("branch") == branch:
-            wt_path = Path(w["path"])
-    if wt_path and repo.status(cwd=wt_path):
-        raise WtError("worktree has uncommitted changes; commit them first",
-                      dirty=[it["path"] for it in repo.status(cwd=wt_path)])
+
+def finish_locked(repo: Repo, args, m: dict, branch: str):
+    base = m["base"]
+    wt_path = worktree_of(repo, m)
+    if wt_path:
+        wrepo = Repo(str(wt_path))
+        if wrepo.rebase_in_progress():
+            conflict_stop(wt_path, conflict_report(wrepo, m), "a rebase is still in progress in the worktree")
+        if wrepo.status():
+            raise WtError("worktree has uncommitted changes; commit them first",
+                          dirty=[it["path"] for it in wrepo.status()])
+    rebased = None
     if git_rc("merge-base", "--is-ancestor", base, branch, cwd=repo.root)[0] != 0:
-        raise WtError(f"{branch} is not rebased onto {base}; run `wt.py rebase` inside the worktree first")
+        if not wt_path:
+            raise WtError(f"{branch} is not rebased onto {base} and has no worktree to rebase in; "
+                          "check it out in a worktree and run `wt.py rebase` there first")
+        rebased = rebase_before_landing(m, wt_path)
 
     commits = git("log", "--oneline", f"{base}..{branch}", cwd=repo.root).splitlines()
     if not commits:
@@ -616,6 +705,9 @@ def cmd_finish(args):
 
     where = base_checkout(repo, base)
     steps = []
+    if rebased:
+        steps.append(f"rebased {branch} onto {base} in place ({rebased['base_moved_by']} new commit(s) since "
+                     "its own rebase)")
     target_sha = repo.sha(branch)
 
     if args.squash:
@@ -648,7 +740,7 @@ def cmd_finish(args):
     if not args.keep:
         steps += cleanup(repo, m, force_branch=force_branch)
     emit({"ok": True, "landed": len(commits), "base": base, "base_now": repo.sha(base),
-          "commits": commits, "steps": steps, "kept": bool(args.keep)})
+          "commits": commits, "steps": steps, "kept": bool(args.keep), **(rebased or {})})
 
 
 # ─── abandon / list ─────────────────────────────────────────────────────────

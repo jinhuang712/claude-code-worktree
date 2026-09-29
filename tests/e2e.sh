@@ -94,4 +94,100 @@ W3=$(echo "$OUT" | j "d['worktree']")
 OUT=$(python3 "$WT" abandon three)
 [ -f new.txt ] && [ -f wip.txt ] && [ ! -d "$W3" ] || fail "abandon: $OUT"
 echo "✓ abandon"
+
+# ─── finish when the base moved after the worktree's own rebase (another session landed first) ───
+newrepo(){  # fresh repo named $1 with main + one commit; cd into it
+  mkdir -p "$T/$1"; cd "$T/$1"
+  git init -q -b main . ; git config user.email t@t; git config user.name t
+  echo base > base.txt; git add -A; git commit -qm init
+}
+wtstart(){ CLAUDE_CODE_SESSION_ID=$A python3 "$WT" start "$1" | j "d['worktree']"; }
+wtcommit(){ (cd "$1"; echo "$2" > "$2.txt"; git add "$2.txt"; git commit -qm "$2"); }
+
+# non-conflicting: finish rebases in place, lands linearly, cleans up
+newrepo race
+W=$(wtstart feat-a); wtcommit "$W" a
+(cd "$W"; python3 "$WT" rebase >/dev/null)
+echo M > m.txt; git add m.txt; git commit -qm "main m"
+OUT=$(python3 "$WT" finish --name feat-a)
+[ "$(echo "$OUT" | j "d['rebased_during_finish']")" = True ] || fail "in-place rebase not reported: $OUT"
+[ "$(echo "$OUT" | j "d['base_moved_by']")" = 1 ] || fail "base_moved_by: $OUT"
+[ -f a.txt ] && [ -f m.txt ] || fail "both changes must be on main"
+[ "$(git log -2 --format=%s | tr '\n' ,)" = "a,main m," ] || fail "history must be linear: $(git log --oneline)"
+[ ! -d "$W" ] || fail "worktree not removed"
+echo "✓ finish rebases in place when base moved"
+
+# conflicting: exit 7, nothing landed, worktree left mid-rebase; resolve, continue, finish
+newrepo conflict
+echo x > shared.txt; git add -A; git commit -qm shared
+W=$(wtstart feat-b)
+(cd "$W"; echo wt > shared.txt; git add -A; git commit -qm "wt shared"; python3 "$WT" rebase >/dev/null)
+echo main > shared.txt; git add -A; git commit -qm "main shared"
+set +e; OUT=$(python3 "$WT" finish --name feat-b); RC=$?; set -e
+[ $RC -eq 7 ] || fail "expected exit 7, got $RC: $OUT"
+[ "$(echo "$OUT" | j "d['landed']")" = False ] || fail "must not land on conflict"
+[ "$(echo "$OUT" | j "d['worktree'].split('/')[-1]")" = feat-b ] || fail "worktree path missing: $OUT"
+[ "$(git -C "$W" status --short | grep -c '^UU shared.txt')" = 1 ] || fail "worktree should be mid-rebase"
+[ "$(git log -1 --format=%s)" = "main shared" ] || fail "main must not move on conflict"
+set +e; OUT=$(python3 "$WT" finish --name feat-b); RC=$?; set -e
+[ $RC -eq 7 ] || fail "finish during a rebase in progress must stay exit 7, got $RC: $OUT"
+printf 'merged\n' > "$W/shared.txt"
+(cd "$W"; python3 "$WT" continue >/dev/null)
+OUT=$(python3 "$WT" finish --name feat-b)
+[ "$(echo "$OUT" | j "d['landed']")" = 1 ] && grep -q merged shared.txt || fail "landing after resolving: $OUT"
+[ "$(echo "$OUT" | j "'rebased_during_finish' in d")" = False ] || fail "no second in-place rebase expected"
+echo "✓ finish conflict → exit 7, resolve, continue, finish"
+
+# a failing test on the rebased tree: exit 8, nothing landed, worktree intact
+newrepo verifyfail
+mkdir -p .claude; echo '{"test":"test ! -f poison.txt"}' > .claude/wt.json; git add -A; git commit -qm cfg
+W=$(wtstart feat-c); wtcommit "$W" c
+(cd "$W"; python3 "$WT" rebase >/dev/null)
+echo p > poison.txt; git add poison.txt; git commit -qm poison
+set +e; OUT=$(python3 "$WT" finish --name feat-c); RC=$?; set -e
+[ $RC -eq 8 ] || fail "expected exit 8, got $RC: $OUT"
+[ "$(echo "$OUT" | j "d['landed']")" = False ] || fail "must not land red"
+[ "$(git log -1 --format=%s)" = poison ] && [ -d "$W" ] || fail "main moved or worktree lost"
+echo "✓ finish verifies after an in-place rebase (exit 8, nothing landed)"
+
+# lock: a landing waits for the lock, gives up after lockTimeoutSec
+newrepo lock
+mkdir -p .claude
+W=$(wtstart feat-d); wtcommit "$W" d
+LOCK="$(git rev-parse --git-common-dir)/claude-wt/land.lock"; mkdir -p "$(dirname "$LOCK")"
+python3 -c "import fcntl,sys,time; f=open(sys.argv[1],'a+'); fcntl.flock(f, fcntl.LOCK_EX); print('held', flush=True); time.sleep(4)" "$LOCK" > "$T/held.out" &
+HOLDER=$!
+for _ in $(seq 50); do grep -q held "$T/held.out" && break; sleep 0.1; done
+echo '{"lockTimeoutSec":1}' > .claude/wt.json
+set +e; OUT=$(python3 "$WT" finish --name feat-d); RC=$?; set -e
+[ $RC -eq 1 ] && echo "$OUT" | grep -q "another landing" || fail "lock timeout: rc=$RC $OUT"
+[ -d "$W" ] || fail "worktree must survive a lock timeout"
+echo '{"lockTimeoutSec":30}' > .claude/wt.json
+T0=$(date +%s)
+OUT=$(python3 "$WT" finish --name feat-d)
+[ $(( $(date +%s) - T0 )) -ge 1 ] || fail "finish did not wait for the lock"
+[ "$(echo "$OUT" | j "d['landed']")" = 1 ] || fail "landing after the lock was released: $OUT"
+wait $HOLDER
+echo "✓ finish serializes on the landing lock (timeout, then waits and lands)"
+
+# two landings at once: both land, linearly, no merge commits
+newrepo parallel
+W1=$(wtstart p1); W2=$(wtstart p2); wtcommit "$W1" p1; wtcommit "$W2" p2
+python3 "$WT" finish --name p1 > "$T/f1.out" & P1=$!
+python3 "$WT" finish --name p2 > "$T/f2.out" & P2=$!
+wait $P1; wait $P2
+[ -f p1.txt ] && [ -f p2.txt ] || fail "both landings must be on main"
+[ "$(git rev-list --count main)" = 3 ] && [ -z "$(git log --merges --oneline)" ] || fail "history: $(git log --oneline)"
+[ ! -d "$W1" ] && [ ! -d "$W2" ] || fail "worktrees not removed"
+echo "✓ two simultaneous finishes both land"
+
+# --keep, and a base that is not checked out anywhere (ref is moved)
+newrepo keep
+W=$(wtstart feat-k); wtcommit "$W" k
+git switch -q -c elsewhere
+OUT=$(python3 "$WT" finish --name feat-k --keep)
+echo "$OUT" | grep -q "not checked out anywhere" || fail "base ref move: $OUT"
+[ "$(git rev-parse main)" = "$(git -C "$W" rev-parse HEAD)" ] || fail "main should point at the worktree head"
+[ -d "$W" ] && git rev-parse -q --verify wt-feat-k >/dev/null || fail "--keep must keep worktree and branch"
+echo "✓ finish --keep; base not checked out"
 echo ALL PASS
