@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `finish` takes a per-repo landing lock (`.git/claude-wt/land.lock`, `lockTimeoutSec`, default 300), so simultaneous landings queue.
+- Opt-in push: `"push": true` (or a remote name) in `.claude/wt.json` makes `finish` push the landed base branch. Never forces; a failed push keeps the landing and exits 9. `--no-push` skips it once.
+- Tests for in-place rebase, conflicts, a red test after rebase, the lock, simultaneous landings, `--keep`, a base that is not checked out, and push.
+
+### Changed
+- `finish` no longer fails with "not rebased" when another session landed after your rebase: it rebases in place and re-runs `check`/`test`. A conflict (exit 7) or a red test (exit 8) still stops it with nothing landed.
+- Both skills now say which Bash command shapes the worktree isolation guard refuses (loops, `$(…)`, heredocs, `VAR=` assignments, `cd` elsewhere) and what passes instead.
+
+### Fixed
+- `finish` now finds a worktree that is detached in the middle of a rebase, through the path recorded by `start`.
+
 ## [0.1.1] - 2026-09-03
 
 ### Changed

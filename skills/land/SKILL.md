@@ -72,10 +72,18 @@ Call `ExitWorktree`. If it offers to remove the worktree, either answer is fine;
 ### B2. Finish
 
 ```bash
-python3 "$WT" finish --name <name> [--squash -m "<message>"] [--keep]
+python3 "$WT" finish --name <name> [--squash -m "<message>"] [--keep] [--no-push]
 ```
 
-`<name>` is the branch without the `wt-` prefix (from `status`). The script fast-forwards the base wherever it is checked out (or moves the ref if nowhere), verifies the worktree head is an ancestor of base, then removes the worktree, branch, metadata and any leftover stash. With `--squash` you must supply a commit message summarising all landed commits.
+`<name>` is the branch without the `wt-` prefix (from `status`). The script takes a per-repo landing lock. If the base moved since your rebase (another session landed first) it rebases in place and re-runs check/test, so you do not go back into the worktree for that. It then fast-forwards the base wherever it is checked out (or moves the ref if nowhere), verifies the worktree head is an ancestor of base, pushes the base if `push` is set in `.claude/wt.json`, then removes the worktree, branch, metadata and any leftover stash. With `--squash` you must supply a commit message summarising all landed commits.
+
+Exit codes from `finish`:
+
+| exit | meaning | what to do |
+|---|---|---|
+| 7 | the base moved and the in-place rebase conflicts; nothing landed, the worktree is left mid-rebase | `EnterWorktree` with the `worktree` path from the JSON, go back to A3, `ExitWorktree`, run `finish` again |
+| 8 | check/test fail on the rebased tree; nothing landed | `EnterWorktree`, fix, commit, `ExitWorktree`, run `finish` again |
+| 9 | landed and cleaned up, but the push failed | report `push.error`; never force-push; usually the remote moved, so tell the user |
 
 If it reports the fast-forward was **refused**, another session has uncommitted changes in the base checkout overlapping with this landing. Report the `checkout` path and the files; do not stash, reset or checkout on that session's behalf. The worktree is left intact for retry.
 

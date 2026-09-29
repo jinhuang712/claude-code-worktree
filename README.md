@@ -17,6 +17,8 @@ A `PostToolUse` hook records every file this session edits through Edit/Write in
 
 - Fork point is recorded (`branch.wt-<name>.wtBaseSha`), so `rebase --onto` is correct even if the base was force-pushed.
 - Conflicts never auto-abort; exit code 7 returns per-file base/worktree diffs for the model.
+- If another session lands between your rebase and `finish`, `finish` rebases in place and re-runs `check`/`test` instead of failing. A conflict (exit 7) or a red test (exit 8) still stops it with nothing landed.
+- `finish` runs under a per-repo lock (`.git/claude-wt/land.lock`), so simultaneous landings queue instead of racing.
 - Fast-forward is done in whatever checkout has the base; git itself refuses if another session's uncommitted files overlap.
 - Cleanup happens only after `merge-base --is-ancestor` confirms the commits are on base.
 
@@ -47,10 +49,12 @@ Developing locally: `claude plugin marketplace add /path/to/clone` instead of th
 `.claude/wt.json` in the repository you work on:
 
 ```json
-{ "check": "ruff check .", "test": "pytest -q", "lockfiles": ["uv.lock"], "migrations": ["migrations/**"] }
+{ "check": "ruff check .", "test": "pytest -q", "lockfiles": ["uv.lock"], "migrations": ["migrations/**"], "push": true, "lockTimeoutSec": 300 }
 ```
 
 `check`/`test` run in `/wt:land` before landing; `lockfiles` are regenerated instead of hand-merged on conflict; `migrations` conflicts always stop for a human.
+
+`push` is off unless set. `true` pushes the base branch to `origin` after landing, a string names another remote, and `wt.py finish --no-push` skips it once. It never forces: a rejected push keeps the landing, still cleans up, and exits 9 with the error in the `push` field. `lockTimeoutSec` (default 300) is how long `finish` waits for another landing.
 
 ## License
 
@@ -58,4 +62,4 @@ MIT. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## Script
 
-`scripts/wt.py` (Python 3, stdlib only). Subcommands: `track plan start status rebase continue verify finish abandon list`. Exit codes: 0 ok · 1 error · 7 conflicts pending · 8 verify failed. Tests: `tests/e2e.sh`.
+`scripts/wt.py` (Python 3, stdlib only). Subcommands: `track plan start status rebase continue verify finish abandon list`. Exit codes: 0 ok · 1 error · 7 conflicts pending · 8 verify failed · 9 landed but push failed. Tests: `tests/e2e.sh`.
