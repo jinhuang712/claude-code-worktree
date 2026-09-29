@@ -75,3 +75,5 @@ MIT. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 ## Script
 
 `scripts/wt.py` (Python 3, stdlib only). Subcommands: `track plan start status adopt land rebase continue verify finish abandon list gc`. `land` is `adopt` + `rebase` + `verify` in one call. Exit codes: 0 ok · 1 error · 7 conflicts pending · 8 verify failed · 9 landed but push failed. Tests: `tests/e2e.sh`.
+
+`tools/wt-metrics.py` (stdlib only) reads your local Claude Code transcripts and prints how worktree sessions behave: landings, `finish` failures, isolation-guard refusals, pushes per landing, `/wt:land` time. Run it with `--until` before an upgrade and `--since` after, and compare. It prints aggregates only.

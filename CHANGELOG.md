@@ -4,7 +4,15 @@ All notable changes to this project are documented here. Format follows [Keep a 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-30
+
+### Upgrade notes
+- `claude plugin update wt@claude-code-worktree`, then restart sessions to apply it. A running session keeps the version it started with; the old version's directory stays in the plugin cache.
+- While sessions on 0.1.x and 0.2.0 share a repository, a 0.2.0 session sees a 0.1.x session's files as `theirs`, but a 0.1.x session sees a 0.2.0 session's files as `unknown` (its `plan` cannot read the new session-file format). Only 0.2.0 `finish` calls take the landing lock.
+- Nothing is pushed or removed unless you ask: `push` is off by default, and `gc` is a dry run unless `--apply`.
+
 ### Added
+- `tools/wt-metrics.py`: measures from your local transcripts how worktree sessions behave (landings, `finish` failures, isolation-guard refusals, pushes per landing, `/wt:land` time), to compare before and after an upgrade.
 - `wt.py list --all`: every linked worktree with branch, base, ahead/behind, uncommitted files, merged state (patch-equivalent commits count), live sessions, idle time and the reasons it would be kept.
 - `wt.py gc [--apply] [--min-age-hours N]`: removes worktrees under `.claude/worktrees` that are clean, fully merged, without a live session and idle for `gcMinAgeHours` (default 24). Dry run unless `--apply`; takes the landing lock, re-checks each candidate, never forces.
 - Config `sessionTtlHours` (default 12) and `gcMinAgeHours` (default 24).

@@ -1,7 +1,7 @@
 {
   "name": "wt",
   "description": "Session-native git worktrees for Claude Code: /wt:worktree forks a wt-* branch from the current branch taking only this session's changes; /wt:land rebases, resolves conflicts and fast-forwards it back.",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "author": {
     "name": "Jin Huang"
   },
