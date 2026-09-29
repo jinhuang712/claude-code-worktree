@@ -54,6 +54,8 @@ claude plugin update wt@claude-code-worktree   # pull a newer version
 claude plugin uninstall wt@claude-code-worktree
 ```
 
+An update reaches a session when it restarts or runs `/reload-plugins`; other running sessions keep the version they started with (the old version's directory stays in the plugin cache). The [CHANGELOG](CHANGELOG.md) upgrade notes say what to expect while old and new sessions share a repository.
+
 Developing locally: `claude plugin marketplace add /path/to/clone` instead of the GitHub slug, then `claude plugin update` after every source change (installs are copies, not symlinks).
 
 ### Optional per-repo config
