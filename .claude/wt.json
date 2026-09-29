@@ -1,0 +1,4 @@
+{
+  "check": "python3 -m py_compile scripts/wt.py",
+  "test": "bash tests/e2e.sh"
+}
