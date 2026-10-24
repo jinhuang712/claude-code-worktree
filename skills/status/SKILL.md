@@ -4,16 +4,19 @@ description: Show every worktree of this repository at a glance - branch, base, 
 argument-hint: "[--gc] — also run the gc dry run"
 allowed-tools:
   - Bash(wt list *)
+  - Bash("${CLAUDE_PLUGIN_ROOT}/bin/wt" list *)
   - Bash(wt gc)
+  - Bash("${CLAUDE_PLUGIN_ROOT}/bin/wt" gc)
   - Bash(wt preview *)
+  - Bash("${CLAUDE_PLUGIN_ROOT}/bin/wt" preview *)
 ---
 
 # /wt:status — what is in flight
 
-Read-only. Never removes anything.
+Read-only. Never removes anything. Below, `wt` means `"${CLAUDE_PLUGIN_ROOT}/bin/wt"`; always run it by that full path, because `bin/` is not on the Bash PATH in every host (it is not in the Desktop app).
 
 ```bash
-wt list --all
+"${CLAUDE_PLUGIN_ROOT}/bin/wt" list --all
 ```
 
 Show one table, one row per worktree, newest activity first:

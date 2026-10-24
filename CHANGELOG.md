@@ -4,6 +4,12 @@ All notable changes to this project are documented here. Format follows [Keep a 
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-25
+
+### Fixed
+- In the Claude desktop app `bin/` is not on the Bash PATH, so `wt list --all` failed with exit 127 and Claude had to retry by full path. The skills now run `"${CLAUDE_PLUGIN_ROOT}/bin/wt"`, which the skill loader expands to the installed path, and `allowed-tools` lists both forms. `bin/wt` stays for use from a terminal where the PATH does include it.
+- The `/wt:status` eval matches the full-path call.
+
 ## [0.3.0] - 2026-10-25
 
 ### Upgrade notes

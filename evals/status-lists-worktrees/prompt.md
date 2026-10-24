@@ -1,7 +1,7 @@
 ---
 name: status-lists-worktrees
 tags: [smoke]
-allowed_tools: [Skill]
+allowed_tools: [Skill, Bash]
 max_turns: 8
 ---
 

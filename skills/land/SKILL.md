@@ -4,6 +4,7 @@ description: Land the current worktree (a wt-* one, or any linked worktree branc
 argument-hint: "[--squash] [--keep] [--pr] — squash into one commit; keep worktree after landing; open a pull request instead of landing locally"
 allowed-tools:
   - Bash(wt *)
+  - Bash("${CLAUDE_PLUGIN_ROOT}/bin/wt" *)
   - Bash(git status *)
   - Bash(git diff *)
   - Bash(git log *)
@@ -18,14 +19,14 @@ allowed-tools:
 
 # /wt:land — land the worktree onto its base branch
 
-`wt` is the plugin's `bin/wt` (on the Bash PATH while the plugin is enabled). Two phases. Phase A runs **inside** the worktree; phase B runs **after ExitWorktree** in the main checkout, because worktree isolation blocks git commands aimed at the main checkout.
+Below, `wt` means `"${CLAUDE_PLUGIN_ROOT}/bin/wt"`; always run it by that full path, because `bin/` is not on the Bash PATH in every host (it is not in the Desktop app). Two phases. Phase A runs **inside** the worktree; phase B runs **after ExitWorktree** in the main checkout, because worktree isolation blocks git commands aimed at the main checkout.
 
 ## Phase A — inside the worktree
 
 ### A1. Land check
 
 ```bash
-wt land              # adopt if needed, rebase onto the base, run check/test
+"${CLAUDE_PLUGIN_ROOT}/bin/wt" land              # adopt if needed, rebase onto the base, run check/test
 ```
 
 | exit | meaning | what to do |
@@ -57,7 +58,7 @@ For each file:
 Then:
 
 ```bash
-wt continue          # stages resolved files, runs `git rebase --continue`
+"${CLAUDE_PLUGIN_ROOT}/bin/wt" continue          # stages resolved files, runs `git rebase --continue`
 ```
 
 Repeat while the exit code is 7 (multi-commit rebases conflict per commit); once `continue` succeeds, run `land` again (a no-op rebase, then check/test). Never run `git rebase --abort` or `git rebase --skip` on your own; if a conflict is beyond you, stop, leave everything in place, and explain.
@@ -71,7 +72,7 @@ Repeat while the exit code is 7 (multi-commit rebases conflict per commit); once
 After `land` returns `ready`, stay in the worktree and run
 
 ```bash
-wt pr [--title "<title>" --body "<body>"] [--draft]
+"${CLAUDE_PLUGIN_ROOT}/bin/wt" pr [--title "<title>" --body "<body>"] [--draft]
 ```
 
 It pushes `wt-<name>` (never forced) to the `push` remote or `origin`, and opens the PR with `gh`. Without `--title` it uses the commit messages. If `gh` is missing, the branch is still pushed; tell the user to open the PR from their git host. Report the PR URL and stop: the worktree stays so review feedback can be pushed, and Phase B does not apply. After the PR is merged, `wt gc --apply` removes the worktree.
@@ -85,7 +86,7 @@ Call `ExitWorktree`. If it offers to remove the worktree, either answer is fine;
 ### B2. Finish
 
 ```bash
-wt finish --name <name> [--squash -m "<message>"] [--keep] [--no-push]
+"${CLAUDE_PLUGIN_ROOT}/bin/wt" finish --name <name> [--squash -m "<message>"] [--keep] [--no-push]
 ```
 
 `<name>` is the `finish` field from `land` (the branch without its `wt-` prefix; `finish` also finds `worktree-<name>` and exact branch names). The script takes a per-repo landing lock. If the base moved since your rebase (another session landed first) it rebases in place and re-runs check/test, so you do not go back into the worktree for that. It then fast-forwards the base wherever it is checked out (or moves the ref if nowhere), verifies the worktree head is an ancestor of base, pushes the base if `push` is set in `.claude/wt.json`, then removes the worktree, branch, metadata and any leftover stash. With `--squash` you must supply a commit message summarising all landed commits.

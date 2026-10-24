@@ -4,6 +4,7 @@ description: Fork the current branch into an isolated wt-* git worktree inside t
 argument-hint: "[name] — short slug for the worktree, e.g. auth-refactor"
 allowed-tools:
   - Bash(wt *)
+  - Bash("${CLAUDE_PLUGIN_ROOT}/bin/wt" *)
   - Bash(git status *)
   - Bash(git diff *)
   - EnterWorktree
@@ -12,12 +13,12 @@ allowed-tools:
 
 # /wt:worktree — fork this session's work into a worktree
 
-`wt` is the plugin's `bin/wt` (on the Bash PATH while the plugin is enabled). Every subcommand prints JSON; read it, don't guess.
+Below, `wt` means `"${CLAUDE_PLUGIN_ROOT}/bin/wt"`; always run it by that full path, because `bin/` is not on the Bash PATH in every host (it is not in the Desktop app). Every subcommand prints JSON; read it, don't guess.
 
 ## 1. Plan
 
 ```bash
-wt plan
+"${CLAUDE_PLUGIN_ROOT}/bin/wt" plan
 ```
 
 Stop and tell the user if `warnings` is non-empty (detached HEAD, already on a `wt-*` branch, rebase in progress).
@@ -38,7 +39,7 @@ Do not read the file contents to decide; decide from what you did in this conver
 Pick a name: `$ARGUMENTS` if given, otherwise a 2–4 word kebab slug for the task. Then
 
 ```bash
-wt start <name> --take <path> <path> ...
+"${CLAUDE_PLUGIN_ROOT}/bin/wt" start <name> --take <path> <path> ...
 ```
 
 `start` must run from the main checkout. If this session is already inside a worktree, call `ExitWorktree` (`keep`) first.
