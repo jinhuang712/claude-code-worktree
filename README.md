@@ -23,7 +23,7 @@ claude plugin marketplace add jinhuang712/claude-code-worktree
 claude plugin install wt@claude-code-worktree
 ```
 
-Start a new Claude Code session, then:
+Start a new Claude Code session (hooks load at session start; a session already running at install time records no edits, so its changes all land in `unknown`), then:
 
 1. `/wt:worktree fix-login` forks `wt-fix-login` into `.claude/worktrees/fix-login` and enters it. Whatever this session already edited moves with you.
 2. Work as usual. Claude commits in the worktree.
@@ -53,7 +53,7 @@ The move is a pathspec-limited `git stash push -u`, re-applied inside the new wo
 1. **Inside the worktree**, `wt.py land` rebases onto the recorded fork base, then runs `check` and `test` from `.claude/wt.json`. The fork point is recorded, so `rebase --onto` is correct even if the base moved or was rewritten. Conflicts stop with exit 7 and per-file base/worktree diffs; Claude resolves them keeping both intents and never aborts the rebase on its own. Lockfiles are regenerated rather than hand-merged, and migration conflicts always stop for a human.
 2. **After `ExitWorktree`**, `wt.py finish` takes a per-repo lock, fast-forwards the base wherever it is checked out, and removes the worktree, branch and metadata. If the base moved again in between, it rebases in place and re-runs your checks first; a conflict or a red test lands nothing.
 
-`--squash -m "<message>"` lands one commit; `--keep` keeps the worktree. Set `"push": true` to push the landed branch too (see [Config](#config)).
+`--squash -m "<message>"` lands one commit; `--keep` keeps the worktree. Set `"push": true` to push the base branch after it lands (see [Config](#config)).
 
 ### Worktrees the plugin did not create
 
@@ -130,7 +130,7 @@ claude plugin update wt@claude-code-worktree   # pull a newer version
 claude plugin uninstall wt@claude-code-worktree
 ```
 
-The first install command uses user scope; add `--scope project` to share the plugin through the project's `.claude/settings.json`.
+`claude plugin install` uses user scope by default; `claude plugin install wt@claude-code-worktree --scope project` shares the plugin through the project's `.claude/settings.json`.
 
 An update reaches a session when it restarts or runs `/reload-plugins`; other running sessions keep the version they started with (the old version's directory stays in the plugin cache). The [CHANGELOG](CHANGELOG.md) upgrade notes say what to expect while old and new sessions share a repository.
 

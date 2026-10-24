@@ -3,7 +3,7 @@ name: land
 description: Land the current worktree (a wt-* one, or any linked worktree branch) back onto the branch it was forked from - commit, rebase onto the (possibly moved) base, resolve conflicts, verify, fast-forward, clean up. Use when the user says /wt:land, "land 回去", "合回原分支", or is done with worktree work.
 argument-hint: "[--squash] [--keep] — squash into one commit; keep worktree after landing"
 allowed-tools:
-  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/wt.py" *)
+  - Bash(wt *)
   - Bash(git status *)
   - Bash(git diff *)
   - Bash(git log *)
@@ -18,14 +18,14 @@ allowed-tools:
 
 # /wt:land — land the worktree onto its base branch
 
-`WT="${CLAUDE_PLUGIN_ROOT}/scripts/wt.py"`. Two phases. Phase A runs **inside** the worktree; phase B runs **after ExitWorktree** in the main checkout, because worktree isolation blocks git commands aimed at the main checkout.
+`wt` is the plugin's `bin/wt` (on the Bash PATH while the plugin is enabled). Two phases. Phase A runs **inside** the worktree; phase B runs **after ExitWorktree** in the main checkout, because worktree isolation blocks git commands aimed at the main checkout.
 
 ## Phase A — inside the worktree
 
 ### A1. Land check
 
 ```bash
-python3 "$WT" land              # adopt if needed, rebase onto the base, run check/test
+wt land              # adopt if needed, rebase onto the base, run check/test
 ```
 
 | exit | meaning | what to do |
@@ -37,7 +37,7 @@ python3 "$WT" land              # adopt if needed, rebase onto the base, run che
 
 To commit, use commands the worktree isolation guard accepts: `git add <paths>`, then `git commit -q -m "<subject>" -m "<body>"`, or write the message to a file with the Write tool and run `git commit -q -F <file>`. Write a real message describing the change (one commit per logical change is fine). A heredoc (`<<EOF`, `-F -`), `cd`, or `$(…)` is refused as "too complex to verify" and costs a turn.
 
-**Worktrees `/wt:worktree` did not create** (a plain `git worktree add`, the built-in `EnterWorktree`, a `wt-*` branch without metadata) are adopted automatically. When the JSON has `adopted`, tell the user which base was inferred (`adopted.base`, `adopted.how`) before going on. If it fails with `candidates`, the branch also contains another branch's commits and may be stacked: ask with AskUserQuestion which candidate it should land on, run `python3 "$WT" adopt --base <branch>`, then `land` again.
+**Worktrees `/wt:worktree` did not create** (a plain `git worktree add`, the built-in `EnterWorktree`, a `wt-*` branch without metadata) are adopted automatically. When the JSON has `adopted`, tell the user which base was inferred (`adopted.base`, `adopted.how`) before going on. If it fails with `candidates`, the branch also contains another branch's commits and may be stacked: ask with AskUserQuestion which candidate it should land on, run `wt adopt --base <branch>`, then `land` again.
 
 `status`, `rebase` and `verify` still exist if you need one step on its own.
 
@@ -55,7 +55,7 @@ For each file:
 Then:
 
 ```bash
-python3 "$WT" continue          # stages resolved files, runs `git rebase --continue`
+wt continue          # stages resolved files, runs `git rebase --continue`
 ```
 
 Repeat while the exit code is 7 (multi-commit rebases conflict per commit); once `continue` succeeds, run `land` again (a no-op rebase, then check/test). Never run `git rebase --abort` or `git rebase --skip` on your own; if a conflict is beyond you, stop, leave everything in place, and explain.
@@ -73,7 +73,7 @@ Call `ExitWorktree`. If it offers to remove the worktree, either answer is fine;
 ### B2. Finish
 
 ```bash
-python3 "$WT" finish --name <name> [--squash -m "<message>"] [--keep] [--no-push]
+wt finish --name <name> [--squash -m "<message>"] [--keep] [--no-push]
 ```
 
 `<name>` is the `finish` field from `land` (the branch without its `wt-` prefix; `finish` also finds `worktree-<name>` and exact branch names). The script takes a per-repo landing lock. If the base moved since your rebase (another session landed first) it rebases in place and re-runs check/test, so you do not go back into the worktree for that. It then fast-forwards the base wherever it is checked out (or moves the ref if nowhere), verifies the worktree head is an ancestor of base, pushes the base if `push` is set in `.claude/wt.json`, then removes the worktree, branch, metadata and any leftover stash. With `--squash` you must supply a commit message summarising all landed commits.

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Plugin bin/ is on the Bash tool's PATH, so skills can run `wt <cmd>`.
+exec python3 "$(dirname "$0")/../scripts/wt.py" "$@"

@@ -3,7 +3,7 @@ name: worktree
 description: Fork the current branch into an isolated wt-* git worktree inside this session, carrying only the changes this session made and leaving other sessions' uncommitted work in place. Use when the user says /wt:worktree, "开一个 worktree", "在 worktree 里做", or wants to isolate risky work from a shared checkout.
 argument-hint: "[name] — short slug for the worktree, e.g. auth-refactor"
 allowed-tools:
-  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/wt.py" *)
+  - Bash(wt *)
   - Bash(git status *)
   - Bash(git diff *)
   - EnterWorktree
@@ -12,12 +12,12 @@ allowed-tools:
 
 # /wt:worktree — fork this session's work into a worktree
 
-`WT="${CLAUDE_PLUGIN_ROOT}/scripts/wt.py"`. Every subcommand prints JSON; read it, don't guess.
+`wt` is the plugin's `bin/wt` (on the Bash PATH while the plugin is enabled). Every subcommand prints JSON; read it, don't guess.
 
 ## 1. Plan
 
 ```bash
-python3 "$WT" plan
+wt plan
 ```
 
 Stop and tell the user if `warnings` is non-empty (detached HEAD, already on a `wt-*` branch, rebase in progress).
@@ -38,7 +38,7 @@ Do not read the file contents to decide; decide from what you did in this conver
 Pick a name: `$ARGUMENTS` if given, otherwise a 2–4 word kebab slug for the task. Then
 
 ```bash
-python3 "$WT" start <name> --take <path> <path> ...
+wt start <name> --take <path> <path> ...
 ```
 
 `start` must run from the main checkout. If this session is already inside a worktree, call `ExitWorktree` (`keep`) first.
