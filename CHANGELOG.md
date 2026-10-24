@@ -4,12 +4,22 @@ All notable changes to this project are documented here. Format follows [Keep a 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-25
+
+### Upgrade notes
+- `claude plugin update wt@claude-code-worktree`, then restart sessions. A running session keeps the version it started with, so it has no `/wt:status`, `bin/wt` or `SessionStart` hook until it restarts.
+- Nothing new is destructive: `wt pr` pushes a branch but never forces, and `gc` is still a dry run unless `--apply`.
+
 ### Added
+- `evals/`: a smoke case for `/wt:status`, run with `claude plugin eval . --scaffold`.
 - `bin/wt`: the plugin's CLI on the Bash PATH. Skills call `wt land` instead of `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/wt.py" land`; `${CLAUDE_PLUGIN_ROOT}` is not documented to expand in `allowed-tools`, so the old pre-approval may never have matched.
 - `/wt:status`: every worktree at a glance, read-only.
 - `wt preview`: predicts landing conflicts with `git merge-tree`, touching nothing (git ≥ 2.38).
 - `wt pr` and `/wt:land --pr`: push the branch (never forced) and open a pull request with `gh`; the worktree is kept.
 - `SessionStart` hook (`wt session-start`): a new or resumed session is told which worktrees still hold unlanded work. Silent when there are none.
+
+### Changed
+- Plugin description shortened. README states the version floors from the Claude Code changelog: Claude Code ≥ 2.1.105, git ≥ 2.31 (≥ 2.38 for `wt preview`).
 
 ### Fixed
 - README: `push` pushes the base branch, `--scope project` names its command, and a session started before install is said to record nothing.

@@ -1,7 +1,7 @@
 {
   "name": "wt",
   "description": "Move only this session's edits into a git worktree, then land them back: rebased, tested, conflict-aware.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": {
     "name": "Jin Huang"
   },
