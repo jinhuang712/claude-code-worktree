@@ -53,7 +53,7 @@ The move is a pathspec-limited `git stash push -u`, re-applied inside the new wo
 1. **Inside the worktree**, `wt.py land` rebases onto the recorded fork base, then runs `check` and `test` from `.claude/wt.json`. The fork point is recorded, so `rebase --onto` is correct even if the base moved or was rewritten. Conflicts stop with exit 7 and per-file base/worktree diffs; Claude resolves them keeping both intents and never aborts the rebase on its own. Lockfiles are regenerated rather than hand-merged, and migration conflicts always stop for a human.
 2. **After `ExitWorktree`**, `wt.py finish` takes a per-repo lock, fast-forwards the base wherever it is checked out, and removes the worktree, branch and metadata. If the base moved again in between, it rebases in place and re-runs your checks first; a conflict or a red test lands nothing.
 
-`--squash -m "<message>"` lands one commit; `--keep` keeps the worktree. Set `"push": true` to push the base branch after it lands (see [Config](#config)).
+`wt preview` predicts conflicts first without touching anything. `/wt:land --pr` pushes the branch and opens a pull request instead of landing locally (needs `gh`; the worktree stays for review feedback). `--squash -m "<message>"` lands one commit; `--keep` keeps the worktree. Set `"push": true` to push the base branch after it lands (see [Config](#config)).
 
 ### Worktrees the plugin did not create
 
@@ -80,7 +80,8 @@ A plain `git worktree add`, the built-in `EnterWorktree` (`worktree-<name>` bran
 | | what it does |
 |---|---|
 | `/wt:worktree [name]` | From the current branch, fork `wt-<name>` into `.claude/worktrees/<name>`, moving only this session's uncommitted changes there, then enter it. |
-| `/wt:land [--squash] [--keep]` | Commit, rebase onto the base, resolve conflicts, verify, exit the worktree, fast-forward the base and clean up. Works on any linked worktree. |
+| `/wt:land [--squash] [--keep] [--pr]` | Commit, rebase onto the base, resolve conflicts, verify, exit the worktree, fast-forward the base and clean up. With `--pr`, push the branch and open a pull request instead. Works on any linked worktree. |
+| `/wt:status` | Every worktree at a glance: unlanded commits, uncommitted files, live sessions, what `gc` would remove. Read-only. |
 
 ### `scripts/wt.py`
 
@@ -96,9 +97,12 @@ Every subcommand prints one JSON object. Python 3, standard library only.
 | `adopt [--base <branch>] [--name <n>]` | worktree or main | record base and fork point for a worktree `start` did not create |
 | `finish --name <n> [--squash -m <msg>] [--keep] [--no-push]` | main checkout | land and clean up |
 | `abandon <name> [--discard]` | main checkout | bring the changes back (or discard them) and remove the worktree |
+| `preview [--name <n>]` | worktree or main | predict landing conflicts without touching anything (git ≥ 2.38) |
+| `pr [--title <t>] [--body <b>] [--draft]` | worktree | push the branch and open a pull request with `gh`, instead of landing locally |
 | `list [--all]` | anywhere | `wt-*` branches, or every linked worktree with its state |
 | `gc [--apply] [--min-age-hours <n>]` | anywhere | remove idle, merged worktrees; dry run unless `--apply` |
 | `track` | hook | record a file edit (reads the hook JSON on stdin) |
+| `session-start` | hook | at session start, list worktrees that still hold unlanded work |
 
 Exit codes: `0` ok · `1` error or precondition (for example a dirty worktree) · `7` conflicts pending · `8` check or test failed · `9` landed but the push failed.
 

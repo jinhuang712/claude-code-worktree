@@ -4,6 +4,16 @@ All notable changes to this project are documented here. Format follows [Keep a 
 
 ## [Unreleased]
 
+### Added
+- `bin/wt`: the plugin's CLI on the Bash PATH. Skills call `wt land` instead of `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/wt.py" land`; `${CLAUDE_PLUGIN_ROOT}` is not documented to expand in `allowed-tools`, so the old pre-approval may never have matched.
+- `/wt:status`: every worktree at a glance, read-only.
+- `wt preview`: predicts landing conflicts with `git merge-tree`, touching nothing (git ≥ 2.38).
+- `wt pr` and `/wt:land --pr`: push the branch (never forced) and open a pull request with `gh`; the worktree is kept.
+- `SessionStart` hook (`wt session-start`): a new or resumed session is told which worktrees still hold unlanded work. Silent when there are none.
+
+### Fixed
+- README: `push` pushes the base branch, `--scope project` names its command, and a session started before install is said to record nothing.
+
 ## [0.2.0] - 2026-09-30
 
 ### Upgrade notes

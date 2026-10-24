@@ -1,7 +1,7 @@
 ---
 name: land
 description: Land the current worktree (a wt-* one, or any linked worktree branch) back onto the branch it was forked from - commit, rebase onto the (possibly moved) base, resolve conflicts, verify, fast-forward, clean up. Use when the user says /wt:land, "land 回去", "合回原分支", or is done with worktree work.
-argument-hint: "[--squash] [--keep] — squash into one commit; keep worktree after landing"
+argument-hint: "[--squash] [--keep] [--pr] — squash into one commit; keep worktree after landing; open a pull request instead of landing locally"
 allowed-tools:
   - Bash(wt *)
   - Bash(git status *)
@@ -41,6 +41,8 @@ To commit, use commands the worktree isolation guard accepts: `git add <paths>`,
 
 `status`, `rebase` and `verify` still exist if you need one step on its own.
 
+To see whether a landing would conflict before touching anything, run `wt preview` (read-only; needs git ≥ 2.38). It names the files and flags lockfiles and migrations. Run it first when `status` says the base moved, and tell the user what it predicts.
+
 ### A2. Conflicts (exit 7) — resolve, never abort
 
 The JSON lists every conflicted file with `kind`, `base_commits`/`base_diff` (what the base branch did since the fork) and `worktree_commits`/`worktree_diff` (what we did). Roles are swapped during rebase: `<<<<<<< HEAD/ours` is the **base**, `>>>>>>> theirs` is **our** worktree commit.
@@ -63,6 +65,16 @@ Repeat while the exit code is 7 (multi-commit rebases conflict per commit); once
 ### A3. Red check/test (exit 8)
 
 `land` runs `.claude/wt.json` `check` then `test`. Fix the failure in the worktree, commit, run `land` again. Do not land red.
+
+### A4. Pull request instead of a local landing (`--pr`, or the user asks for a PR)
+
+After `land` returns `ready`, stay in the worktree and run
+
+```bash
+wt pr [--title "<title>" --body "<body>"] [--draft]
+```
+
+It pushes `wt-<name>` (never forced) to the `push` remote or `origin`, and opens the PR with `gh`. Without `--title` it uses the commit messages. If `gh` is missing, the branch is still pushed; tell the user to open the PR from their git host. Report the PR URL and stop: the worktree stays so review feedback can be pushed, and Phase B does not apply. After the PR is merged, `wt gc --apply` removes the worktree.
 
 ## Phase B — main checkout
 
