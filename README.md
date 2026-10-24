@@ -29,7 +29,7 @@ Start a new Claude Code session (hooks load at session start; a session already 
 2. Work as usual. Claude commits in the worktree.
 3. `/wt:land` rebases, verifies, lands on the branch you forked from, and removes the worktree.
 
-Requires Claude Code ≥ 2.1.185 (`EnterWorktree` / `ExitWorktree`), git ≥ 2.23 and Python 3 (standard library only). The landing lock uses `flock` (macOS, Linux); elsewhere landings are not serialized.
+Requires Claude Code ≥ 2.1.105 (`EnterWorktree` with `path`, `ExitWorktree`, plugin `bin/`), git ≥ 2.31 (≥ 2.38 for `wt preview`) and Python 3 (standard library only). The landing lock uses `flock` (macOS, Linux); elsewhere landings are not serialized.
 
 ## How it works
 
