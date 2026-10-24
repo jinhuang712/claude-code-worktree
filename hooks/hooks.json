@@ -1,5 +1,5 @@
 {
-  "description": "Record which files each Claude session edits, so /wt:worktree can move only this session's changes.",
+  "description": "Record which files each Claude session edits, so /wt:worktree can move only this session's changes; at session start, list worktrees that still hold unlanded work.",
   "hooks": {
     "PostToolUse": [
       {
@@ -9,6 +9,18 @@
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/wt.py\" track",
             "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/wt.py\" session-start",
+            "timeout": 10
           }
         ]
       }

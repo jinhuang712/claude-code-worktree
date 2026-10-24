@@ -1137,6 +1137,112 @@ def cmd_list(args):
     emit({"worktrees": items, "main": str(repo.main_root)})
 
 
+# ─── preview / pr / session-start ───────────────────────────────────────────
+
+def target_wt(repo: Repo, name: str | None) -> dict:
+    return meta_or_adopt(repo, resolve_branch(repo, name)) if name else current_wt(repo)
+
+
+def cmd_preview(args):
+    """Predict whether landing would conflict, without touching the worktree, the index or any ref."""
+    repo = Repo()
+    m = target_wt(repo, args.name)
+    base, branch = m["base"], m["branch"]
+    if not repo.ref_exists(f"refs/heads/{base}"):
+        raise WtError(f"base branch {base} no longer exists")
+    rc, out, err = git_rc("merge-tree", "--write-tree", "--name-only", "--no-messages", base, branch, cwd=repo.root)
+    if rc not in (0, 1):
+        raise WtError(f"git merge-tree failed (needs git >= 2.38): {err.strip()}")
+    files = []
+    for ln in out.splitlines()[1:]:
+        if not ln:
+            break
+        files.append(ln)
+    cfg = repo.config()
+    emit({"ok": True, "base": base, "branch": branch, "conflicts": rc == 1,
+          "files": [{"path": f, "kind": kind_of(f, cfg)} for f in sorted(set(files))],
+          "note": "a one-shot merge of both tips; the real rebase replays commit by commit and can differ"})
+
+
+def cmd_pr(args):
+    """Open a pull request instead of fast-forwarding the base locally. Never forces the push."""
+    repo = Repo()
+    m = target_wt(repo, args.name)
+    base, branch = m["base"], m["branch"]
+    wt_path = worktree_of(repo, m)
+    if wt_path and Repo(str(wt_path)).status():
+        raise WtError("worktree has uncommitted changes; commit them first",
+                      dirty=[it["path"] for it in Repo(str(wt_path)).status()])
+    if not git("log", "--oneline", f"{base}..{branch}", cwd=repo.root).strip():
+        raise WtError(f"{branch} has no commits beyond {base}; nothing to open a PR for")
+    remote = push_remote(repo) or "origin"
+    if git_rc("remote", "get-url", remote, cwd=repo.root)[0]:
+        raise WtError(f"no remote named {remote}")
+    try:
+        p = subprocess.run(["git", "push", "-u", remote, f"refs/heads/{branch}:refs/heads/{branch}"], cwd=repo.root,
+                           text=True, capture_output=True, timeout=PUSH_TIMEOUT,
+                           env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+    except subprocess.TimeoutExpired:
+        raise WtError(f"git push did not finish within {PUSH_TIMEOUT}s")
+    if p.returncode:
+        raise WtError(f"push failed (nothing is forced): {(p.stderr or p.stdout).strip()[-1500:]}")
+    out = {"ok": True, "pushed": branch, "remote": remote, "base": base, "worktree": str(wt_path) if wt_path else None}
+    if not repo.ref_exists(f"refs/remotes/{remote}/{base}"):
+        out["warning"] = f"{remote}/{base} does not exist; the PR base must exist on the remote"
+    if not shutil.which("gh"):
+        out["pr"] = None
+        out["note"] = "gh is not installed: open the PR from the pushed branch in your git host"
+        emit(out)
+    cmd = ["gh", "pr", "create", "--base", base, "--head", branch]
+    cmd += ["--title", args.title, "--body", args.body or ""] if args.title else ["--fill"]
+    if args.draft:
+        cmd.append("--draft")
+    out["pr"] = None
+    try:
+        g = subprocess.run(cmd, cwd=repo.root, text=True, capture_output=True, timeout=PUSH_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        out["error"] = f"gh pr create did not finish within {PUSH_TIMEOUT}s"
+        emit(out, EXIT_ERR)
+        return
+    if g.returncode:
+        out["error"] = "gh pr create failed: " + (g.stderr or g.stdout).strip()[-800:]
+        emit(out, EXIT_ERR)
+    lines = g.stdout.strip().splitlines()
+    out["pr"] = lines[-1] if lines else None
+    out["note"] = ("the worktree is kept so review feedback can be pushed; once the PR is merged, "
+                   "`wt gc --apply` removes it (a squash merge is not recognised: use `abandon --discard`)")
+    emit(out)
+
+
+def cmd_session_start(_args):
+    """SessionStart hook: tell the session which worktrees still hold unlanded work. Silent when none."""
+    try:
+        data = json.load(sys.stdin)
+    except Exception:
+        data = {}
+    try:
+        repo = Repo(data.get("cwd") or os.getcwd())
+        here = os.path.realpath(repo.root)
+        items = [i for i in assess_all(repo, gc_min_age(repo, None))
+                 if i.get("branch") and os.path.realpath(i["path"]) != here
+                 and ((i.get("ahead") and not i.get("merged")) or i.get("dirty"))]
+    except Exception:
+        return
+    if not items:
+        return
+    lines = []
+    for i in items[:8]:
+        bits = [f"{i['ahead']} unlanded commit(s) on {i['base']}"] if i.get("ahead") and not i.get("merged") else []
+        if i.get("dirty"):
+            bits.append(f"{i['dirty']} uncommitted file(s)")
+        lines.append(f"- {i['branch']} ({os.path.relpath(i['path'], repo.main_root)}): {', '.join(bits)}, "
+                     f"idle {i.get('idle_hours', 0):g}h")
+    more = f"\n(+{len(items) - 8} more; `wt list --all` shows all)" if len(items) > 8 else ""
+    msg = ("wt: worktrees with unlanded work in this repository:\n" + "\n".join(lines) + more +
+           "\nMention them to the user only if relevant; /wt:land lands one, /wt:status lists all.")
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": msg}}))
+
+
 # ─── main ───────────────────────────────────────────────────────────────────
 
 def main(argv=None):
@@ -1163,6 +1269,14 @@ def main(argv=None):
     p.add_argument("--name", required=True); p.add_argument("--squash", action="store_true")
     p.add_argument("--message", "-m"); p.add_argument("--keep", action="store_true")
     p.add_argument("--no-push", action="store_true", help="skip the push configured in .claude/wt.json")
+    p = sub.add_parser("preview", help="predict landing conflicts without touching anything (git >= 2.38)")
+    p.add_argument("--name", help="branch name, to preview from the main checkout")
+    p = sub.add_parser("pr", help="push the branch and open a pull request instead of landing locally")
+    p.add_argument("--name")
+    p.add_argument("--title")
+    p.add_argument("--body")
+    p.add_argument("--draft", action="store_true")
+    sub.add_parser("session-start", help="SessionStart hook: list worktrees that still hold unlanded work")
     p = sub.add_parser("abandon", help="from main checkout: bring changes back (or discard) and remove worktree")
     p.add_argument("name"); p.add_argument("--discard", action="store_true")
     p = sub.add_parser("list", help="list wt-* branches; --all: every linked worktree with its state and gc verdict")
@@ -1173,7 +1287,7 @@ def main(argv=None):
     p.add_argument("--min-age-hours", type=float)
     args = ap.parse_args(argv)
     try:
-        globals()[f"cmd_{args.cmd}"](args)
+        globals()["cmd_" + args.cmd.replace("-", "_")](args)
     except WtError as e:
         emit({"ok": False, "error": str(e), **e.extra}, e.code)
 

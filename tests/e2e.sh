@@ -407,4 +407,31 @@ git worktree add -q -b worktree-cur .claude/worktrees/cur
 OUT=$(cd .claude/worktrees/cur && python3 "$WT" gc --min-age-hours 0)
 echo "$OUT" | j "[k['why'] for k in d['kept'] if k['branch']=='worktree-cur']" | grep -q "current worktree" || fail "gc must not offer the worktree it runs in: $OUT"
 echo "✓ gc leaves the current worktree alone"
+
+# --- preview, pr and session-start
+cd "$R"; git checkout -q main
+echo base > pv.txt; git add pv.txt; git commit -qm "pv base"
+git worktree add -q -b wt-pv .claude/worktrees/pv
+WP="$R/.claude/worktrees/pv"
+git config branch.wt-pv.wtBase main; git config branch.wt-pv.wtBaseSha "$(git rev-parse HEAD)"
+echo mine > "$WP/pv.txt"; git -C "$WP" commit -qam "pv mine"
+OUT=$(cd "$WP" && python3 "$WT" preview)
+[ "$(echo "$OUT" | j "d['conflicts']")" = False ] || fail "no conflict expected before base moves: $OUT"
+echo theirs > pv.txt; git commit -qam "pv theirs"
+OUT=$(cd "$WP" && python3 "$WT" preview)
+[ "$(echo "$OUT" | j "d['conflicts']")" = True ] && [ "$(echo "$OUT" | j "d['files'][0]['path']")" = pv.txt ] || fail "preview should name pv.txt: $OUT"
+[ -z "$(git -C "$WP" status --porcelain)" ] && ! git -C "$WP" rev-parse -q --verify REBASE_HEAD >/dev/null || fail "preview must not touch the worktree"
+echo "✓ preview predicts a conflict without touching anything"
+
+OUT=$(printf '{"cwd":"%s"}' "$R" | python3 "$WT" session-start)
+echo "$OUT" | grep -q "wt-pv" && echo "$OUT" | grep -q SessionStart || fail "session-start should list wt-pv: $OUT"
+echo "✓ session-start lists unlanded worktrees"
+
+git init -q --bare "$T/remote.git"; git remote add origin "$T/remote.git"; git push -q origin main
+mkdir -p "$T/bin"; printf '#!/bin/sh\necho "https://example.test/pr/1"\n' > "$T/bin/gh"; chmod +x "$T/bin/gh"
+OUT=$(cd "$WP" && PATH="$T/bin:$PATH" python3 "$WT" pr --title t)
+[ "$(echo "$OUT" | j "d['pr']")" = "https://example.test/pr/1" ] || fail "pr url: $OUT"
+git --git-dir="$T/remote.git" rev-parse -q --verify refs/heads/wt-pv >/dev/null || fail "pr must push the branch"
+[ -d "$WP" ] || fail "pr keeps the worktree"
+echo "✓ pr pushes the branch and opens the PR through gh"
 echo ALL PASS
