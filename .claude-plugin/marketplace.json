@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Session-native git worktrees for Claude Code",
-    "version": "0.3.1"
+    "version": "0.3.2"
   },
   "plugins": [
     {

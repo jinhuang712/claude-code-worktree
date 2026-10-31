@@ -4,6 +4,8 @@ All notable changes to this project are documented here. Format follows [Keep a 
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-31
+
 ### Changed
 - Skills follow the user's global CLAUDE.md: one worktree per task forked from the current branch, delete the worktree and branch right after landing (`--keep` only on request), `/wt:status` flags leftovers.
 
