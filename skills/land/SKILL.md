@@ -14,12 +14,18 @@ allowed-tools:
   - Edit
   - Write
   - ExitWorktree
-  - AskUserQuestion
 ---
 
 # /wt:land — land the worktree onto its base branch
 
 Below, `wt` means `"${CLAUDE_PLUGIN_ROOT}/bin/wt"`; always run it by that full path, because `bin/` is not on the Bash PATH in every host (it is not in the Desktop app). Two phases. Phase A runs **inside** the worktree; phase B runs **after ExitWorktree** in the main checkout, because worktree isolation blocks git commands aimed at the main checkout.
+
+## House rules (from the user's global CLAUDE.md)
+
+- **Land onto the branch the worktree was forked from** (main or a feature branch): rebase onto it first if it moved, then fast-forward. Never merge-commit, never land onto a different branch unless the user says so.
+- **Delete the worktree and its branch right after landing.** Do not pass `--keep` unless the user asks for it.
+- **Small iterations**: land each finished task as its own small commit series; don't batch unrelated tasks into one landing.
+- **Asking**: never use AskUserQuestion. Put the question at the very end of your message, then lettered options (`- A. ✅ recommended …`, `- B. …`), and give the reason for the recommendation in a separate section below the list.
 
 ## Phase A — inside the worktree
 
@@ -32,13 +38,13 @@ Below, `wt` means `"${CLAUDE_PLUGIN_ROOT}/bin/wt"`; always run it by that full p
 | exit | meaning | what to do |
 |---|---|---|
 | 0 | `"state": "ready"`: rebased and verified | go to Phase B; pass the `finish` field to `finish --name` |
-| 1 | an error; `dirty` lists uncommitted files | review `git diff`, commit (below), run `land` again. If `base_exists` is false, ask the user which branch to land on and run `land --onto <branch>`. |
+| 1 | an error; `dirty` lists uncommitted files | review `git diff`, commit (below), run `land` again. If `base_exists` is false, ask the user (plain text, see Asking) which branch to land on, then run `land --onto <branch>`. |
 | 7 | rebase conflicts | A2 |
 | 8 | check/test failed | A3 |
 
 To commit, use commands the worktree isolation guard accepts: `git add <paths>`, then `git commit -q -m "<subject>" -m "<body>"`, or write the message to a file with the Write tool and run `git commit -q -F <file>`. Write a real message describing the change (one commit per logical change is fine). A heredoc (`<<EOF`, `-F -`), `cd`, or `$(…)` is refused as "too complex to verify" and costs a turn.
 
-**Worktrees `/wt:worktree` did not create** (a plain `git worktree add`, the built-in `EnterWorktree`, a `wt-*` branch without metadata) are adopted automatically. When the JSON has `adopted`, tell the user which base was inferred (`adopted.base`, `adopted.how`) before going on. If it fails with `candidates`, the branch also contains another branch's commits and may be stacked: ask with AskUserQuestion which candidate it should land on, run `wt adopt --base <branch>`, then `land` again.
+**Worktrees `/wt:worktree` did not create** (a plain `git worktree add`, the built-in `EnterWorktree`, a `wt-*` branch without metadata) are adopted automatically. When the JSON has `adopted`, tell the user which base was inferred (`adopted.base`, `adopted.how`) before going on. If it fails with `candidates`, the branch also contains another branch's commits and may be stacked: ask in plain text which candidate it should land on (recommend one), run `wt adopt --base <branch>`, then `land` again.
 
 `status`, `rebase` and `verify` still exist if you need one step on its own.
 

@@ -30,4 +30,6 @@ For a worktree that is ahead and behind, offer to predict its conflicts with `wt
 
 With `--gc`, also run `wt gc` (a dry run) and list what it would remove. Removing is the user's call: `wt gc --apply` is not in this skill's allowed tools.
 
-End with one line of next steps: `/wt:land` for a ready worktree, `wt gc --apply` for the merged ones.
+Per the user's global CLAUDE.md, a worktree is deleted right after landing, so any **merged** worktree still around is a leftover: flag it. Also flag any worktree whose path is outside the repo, or whose base is not the branch it was forked from.
+
+End with one line of next steps: `/wt:land` for a ready worktree, `wt gc --apply` for the merged ones. If a decision is needed, ask in plain text at the very end with lettered options and a ✅ recommendation (never AskUserQuestion).

@@ -8,12 +8,19 @@ allowed-tools:
   - Bash(git status *)
   - Bash(git diff *)
   - EnterWorktree
-  - AskUserQuestion
 ---
 
 # /wt:worktree — fork this session's work into a worktree
 
 Below, `wt` means `"${CLAUDE_PLUGIN_ROOT}/bin/wt"`; always run it by that full path, because `bin/` is not on the Bash PATH in every host (it is not in the Desktop app). Every subcommand prints JSON; read it, don't guess.
+
+## House rules (from the user's global CLAUDE.md)
+
+- **One worktree per task**, forked from the *current* branch (main or a feature branch). Several tasks in parallel means several worktrees, not one shared one.
+- **Always inside this repo**: the worktree must belong to the same `.git` as the code it changes, and live under the repo's `.claude/worktrees/`. Never create one outside the repo, and never copy the code into a separate directory to work on the copy.
+- **Landing**: when the task is done, `/wt:land` rebases onto the fork branch and fast-forwards, then deletes the worktree and branch immediately.
+- **Small iterations**: commit in small steps inside the worktree.
+- **Asking**: never use AskUserQuestion. Put the question at the very end of your message with lettered options, mark the recommended one with ✅, and give the reason in a separate section under the list.
 
 ## 1. Plan
 
@@ -30,7 +37,7 @@ The dirty files come back in four groups:
 | `ours` | edited by this session via Edit/Write (hook-tracked) | take |
 | `theirs` | edited by another live session | **never take** |
 | `unknown` | nobody tracked it (Bash-generated, user-edited, build output) | you decide: take it only if you created or changed it in this conversation; otherwise leave it |
-| `shared` | both this session and another one touched it | a file can't be split; use AskUserQuestion: take whole file / leave it / stop |
+| `shared` | both this session and another one touched it | a file can't be split; ask in plain text (take whole file / leave it / stop), recommending one |
 
 Do not read the file contents to decide; decide from what you did in this conversation.
 
