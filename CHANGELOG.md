@@ -5,7 +5,7 @@ All notable changes to this project are documented here. Format follows [Keep a 
 ## [Unreleased]
 
 ### Changed
-- Skills follow the user's global CLAUDE.md: no AskUserQuestion (questions go in plain text with lettered options and a recommended one), one worktree per task forked from the current branch, delete the worktree and branch right after landing (`--keep` only on request), `/wt:status` flags leftovers.
+- Skills follow the user's global CLAUDE.md: one worktree per task forked from the current branch, delete the worktree and branch right after landing (`--keep` only on request), `/wt:status` flags leftovers.
 
 ## [0.3.1] - 2026-10-25
 

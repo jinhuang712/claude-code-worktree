@@ -32,4 +32,4 @@ With `--gc`, also run `wt gc` (a dry run) and list what it would remove. Removin
 
 Per the user's global CLAUDE.md, a worktree is deleted right after landing, so any **merged** worktree still around is a leftover: flag it. Also flag any worktree whose path is outside the repo, or whose base is not the branch it was forked from.
 
-End with one line of next steps: `/wt:land` for a ready worktree, `wt gc --apply` for the merged ones. If a decision is needed, ask in plain text at the very end with lettered options and a ✅ recommendation (never AskUserQuestion).
+End with one line of next steps: `/wt:land` for a ready worktree, `wt gc --apply` for the merged ones.
